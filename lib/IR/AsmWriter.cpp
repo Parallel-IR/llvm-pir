@@ -2916,6 +2916,38 @@ void AssemblyWriter::printInstruction(const Instruction &I) {
       writeOperand(I.getOperand(i), true);
     }
     Out << ']';
+  } else if (auto *FI = dyn_cast<ForkInst>(&I)) {
+    Out << ' ';
+    writeOperand(Operand, true);
+    // Special case fork instruction to get formatting nice and correct.
+    if (!FI->canBeSequentialized())
+      Out << " force";
+    if (FI->isInterior())
+      Out << " interior";
+    if (unsigned NumValues = FI->getNumValues()) {
+      Out << " [";
+      for (unsigned i = 0; i != NumValues; ++i) {
+        if (i != 0)
+          Out << ", ";
+        writeOperand(FI->getValue(i), true);
+      }
+      Out << ']';
+    }
+    Out << " [";
+    for (unsigned i = 1, e = I.getNumOperands(); i != e; ++i) {
+      if (i != 1)
+        Out << ", ";
+      writeOperand(I.getOperand(i), true);
+    }
+    Out << ']';
+  } else if (auto *JI = dyn_cast<JoinInst>(&I)) {
+    Out << ' ';
+    writeOperand(JI->getParallelRegionId(), true);
+    Out << ", ";
+    writeOperand(JI->getSuccessor(0), true);
+  } else if (auto *HI = dyn_cast<HaltInst>(&I)) {
+    Out << ' ';
+    writeOperand(HI->getParallelRegionId(), true);
   } else if (const PHINode *PN = dyn_cast<PHINode>(&I)) {
     Out << ' ';
     TypePrinter.print(I.getType(), Out);

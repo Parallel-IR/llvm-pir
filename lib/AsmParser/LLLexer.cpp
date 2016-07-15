@@ -666,6 +666,9 @@ lltok::Kind LLLexer::LexIdentifier() {
   KEYWORD(type);
   KEYWORD(opaque);
 
+  KEYWORD(force);
+  KEYWORD(interior);
+
   KEYWORD(comdat);
 
   // Comdat types
@@ -758,6 +761,9 @@ lltok::Kind LLLexer::LexIdentifier() {
   INSTKEYWORD(ret,         Ret);
   INSTKEYWORD(br,          Br);
   INSTKEYWORD(switch,      Switch);
+  INSTKEYWORD(fork,        Fork);
+  INSTKEYWORD(join,        Join);
+  INSTKEYWORD(halt,        Halt);
   INSTKEYWORD(indirectbr,  IndirectBr);
   INSTKEYWORD(invoke,      Invoke);
   INSTKEYWORD(resume,      Resume);

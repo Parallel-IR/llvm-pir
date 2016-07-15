@@ -413,6 +413,9 @@ private:
   void visitBranchInst(BranchInst &BI);
   void visitReturnInst(ReturnInst &RI);
   void visitSwitchInst(SwitchInst &SI);
+  void visitFork(ForkInst &FI);
+  void visitJoin(JoinInst &JI);
+  void visitHalt(HaltInst &HI);
   void visitIndirectBrInst(IndirectBrInst &BI);
   void visitSelectInst(SelectInst &SI);
   void visitUserOp1(Instruction &I);
@@ -1141,9 +1144,9 @@ void Verifier::visitComdat(const Comdat &C) {
 
 void Verifier::visitModuleIdents(const Module &M) {
   const NamedMDNode *Idents = M.getNamedMetadata("llvm.ident");
-  if (!Idents) 
+  if (!Idents)
     return;
-  
+
   // llvm.ident takes a list of metadata entry. Each entry has only one string.
   // Scan each llvm.ident entry and make sure that this requirement is met.
   for (const MDNode *N : Idents->operands()) {
@@ -1153,7 +1156,7 @@ void Verifier::visitModuleIdents(const Module &M) {
            ("invalid value for llvm.ident metadata entry operand"
             "(the operand should be a string)"),
            N->getOperand(0));
-  } 
+  }
 }
 
 void Verifier::visitModuleFlags(const Module &M) {
@@ -1522,13 +1525,13 @@ void Verifier::verifyFunctionAttrs(FunctionType *FT, AttributeSet Attrs,
 
   Assert(
       !(Attrs.hasAttribute(AttributeSet::FunctionIndex, Attribute::ReadNone) &&
-        Attrs.hasAttribute(AttributeSet::FunctionIndex, 
+        Attrs.hasAttribute(AttributeSet::FunctionIndex,
                            Attribute::InaccessibleMemOrArgMemOnly)),
       "Attributes 'readnone and inaccessiblemem_or_argmemonly' are incompatible!", V);
 
   Assert(
       !(Attrs.hasAttribute(AttributeSet::FunctionIndex, Attribute::ReadNone) &&
-        Attrs.hasAttribute(AttributeSet::FunctionIndex, 
+        Attrs.hasAttribute(AttributeSet::FunctionIndex,
                            Attribute::InaccessibleMemOnly)),
       "Attributes 'readnone and inaccessiblememonly' are incompatible!", V);
 
@@ -1538,7 +1541,7 @@ void Verifier::verifyFunctionAttrs(FunctionType *FT, AttributeSet Attrs,
                            Attribute::AlwaysInline)),
       "Attributes 'noinline and alwaysinline' are incompatible!", V);
 
-  if (Attrs.hasAttribute(AttributeSet::FunctionIndex, 
+  if (Attrs.hasAttribute(AttributeSet::FunctionIndex,
                          Attribute::OptimizeNone)) {
     Assert(Attrs.hasAttribute(AttributeSet::FunctionIndex, Attribute::NoInline),
            "Attribute 'optnone' requires 'noinline'!", V);
@@ -1775,7 +1778,7 @@ void Verifier::verifyStatepoint(ImmutableCallSite CS) {
   Assert(ExpectedNumArgs <= (int)CS.arg_size(),
          "gc.statepoint too few arguments according to length fields", &CI);
 
-  // Check that the only uses of this gc.statepoint are gc.result or 
+  // Check that the only uses of this gc.statepoint are gc.result or
   // gc.relocate calls which are tied to this statepoint and thus part
   // of the same statepoint sequence
   for (const User *U : CI.users()) {
@@ -2192,6 +2195,28 @@ void Verifier::visitSwitchInst(SwitchInst &SI) {
   }
 
   visitTerminatorInst(SI);
+}
+
+void Verifier::visitFork(ForkInst &FI) {
+  for (unsigned i = 0, e = FI.getNumSuccessors(); i != e; ++i)
+    Assert(FI.getSuccessor(i)->getType()->isLabelTy(),
+           "Fork destinations must all have block label type!", &FI);
+
+  visitTerminatorInst(FI);
+}
+
+void Verifier::visitJoin(JoinInst &JI) {
+  Assert(JI.getNumSuccessors() == 1, "Join should have a single successor");
+  Assert(JI.getSuccessor(0)->getType()->isLabelTy(),
+          "Fork destinations must all have block label type!", &JI);
+
+  visitTerminatorInst(JI);
+}
+
+void Verifier::visitHalt(HaltInst &HI) {
+  Assert(HI.getNumSuccessors() == 0, "Halt should not have successors");
+
+  visitTerminatorInst(HI);
 }
 
 void Verifier::visitIndirectBrInst(IndirectBrInst &BI) {
@@ -3796,7 +3821,7 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
 
   // If the intrinsic takes MDNode arguments, verify that they are either global
   // or are local to *this* function.
-  for (Value *V : CS.args()) 
+  for (Value *V : CS.args())
     if (auto *MD = dyn_cast<MetadataAsValue>(V))
       visitMetadataAsValue(*MD, CS.getCaller());
 
@@ -4060,7 +4085,7 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
   }
   case Intrinsic::masked_load: {
     Assert(CS.getType()->isVectorTy(), "masked_load: must return a vector", CS);
-    
+
     Value *Ptr = CS.getArgOperand(0);
     //Value *Alignment = CS.getArgOperand(1);
     Value *Mask = CS.getArgOperand(2);
@@ -4070,12 +4095,12 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
 
     // DataTy is the overloaded type
     Type *DataTy = cast<PointerType>(Ptr->getType())->getElementType();
-    Assert(DataTy == CS.getType(), 
+    Assert(DataTy == CS.getType(),
            "masked_load: return must match pointer type", CS);
     Assert(PassThru->getType() == DataTy,
            "masked_load: pass through and data type must match", CS);
     Assert(Mask->getType()->getVectorNumElements() ==
-           DataTy->getVectorNumElements(), 
+           DataTy->getVectorNumElements(),
            "masked_load: vector mask must be same length as data", CS);
     break;
   }
@@ -4089,10 +4114,10 @@ void Verifier::visitIntrinsicCallSite(Intrinsic::ID ID, CallSite CS) {
 
     // DataTy is the overloaded type
     Type *DataTy = cast<PointerType>(Ptr->getType())->getElementType();
-    Assert(DataTy == Val->getType(), 
+    Assert(DataTy == Val->getType(),
            "masked_store: storee must match pointer type", CS);
     Assert(Mask->getType()->getVectorNumElements() ==
-           DataTy->getVectorNumElements(), 
+           DataTy->getVectorNumElements(),
            "masked_store: vector mask must be same length as data", CS);
     break;
   }

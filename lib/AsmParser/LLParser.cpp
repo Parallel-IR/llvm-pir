@@ -3559,7 +3559,7 @@ bool LLParser::ParseMDField(LocTy Loc, StringRef Name, EmissionKindField &Result
   Lex.Lex();
   return false;
 }
-  
+
 template <>
 bool LLParser::ParseMDField(LocTy Loc, StringRef Name,
                             DwarfAttEncodingField &Result) {
@@ -4941,6 +4941,9 @@ int LLParser::ParseInstruction(Instruction *&Inst, BasicBlock *BB,
   case lltok::kw_ret:         return ParseRet(Inst, BB, PFS);
   case lltok::kw_br:          return ParseBr(Inst, PFS);
   case lltok::kw_switch:      return ParseSwitch(Inst, PFS);
+  case lltok::kw_fork:        return ParseFork(Inst, PFS);
+  case lltok::kw_join:        return ParseJoin(Inst, PFS);
+  case lltok::kw_halt:        return ParseHalt(Inst, PFS);
   case lltok::kw_indirectbr:  return ParseIndirectBr(Inst, PFS);
   case lltok::kw_invoke:      return ParseInvoke(Inst, PFS);
   case lltok::kw_resume:      return ParseResume(Inst, PFS);
@@ -5193,6 +5196,132 @@ bool LLParser::ParseSwitch(Instruction *&Inst, PerFunctionState &PFS) {
   for (unsigned i = 0, e = Table.size(); i != e; ++i)
     SI->addCase(Table[i].first, Table[i].second);
   Inst = SI;
+  return false;
+}
+
+/// ParseFork
+///    ::= 'fork' TypeAndValue [force] [interior] ['[' TypeAndValue+']'] '[' TypeAndValue+ ']'
+bool LLParser::ParseFork(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy IDLoc;
+  Value *ID;
+  if (ParseTypeAndValue(ID, IDLoc, PFS))
+    return true;
+
+  if (!ID->getType()->isIntegerTy())
+    return Error(IDLoc, "fork id must have integer type");
+  if (!isa<ConstantInt>(ID))
+    return Error(IDLoc, "fork id must be a constant");
+
+  bool ForceParallel = Lex.getKind() == lltok::kw_force;
+  if (ForceParallel)
+    Lex.Lex();
+
+  bool Interior = Lex.getKind() == lltok::kw_interior;
+  if (Interior)
+    Lex.Lex();
+
+  if (ParseToken(lltok::lsquare, "expected '[' with fork table"))
+    return true;
+
+  // Parse the jump table pairs.
+  SmallVector<Value*, 32> Values;
+
+  Value *V = nullptr;
+  if (!ParseTypeAndValue(V, PFS)) {
+    if (!isa<BasicBlock>(V)) {
+      Values.push_back(V);
+
+      while (EatIfPresent(lltok::comma)) {
+        if (ParseTypeAndValue(V, PFS))
+          return true;
+        Values.push_back(V);
+      }
+
+      if (ParseToken(lltok::rsquare, "expected ']' at end of value list"))
+        return true;
+      if (ParseToken(lltok::lsquare, "expected '[' with fork table"))
+        return true;
+      V = nullptr;
+    }
+  }
+
+  // Parse the jump table pairs.
+  SmallVector<BasicBlock*, 32> DestList;
+
+  BasicBlock *DestBB;
+  if (V) {
+    assert(isa<BasicBlock>(V));
+    DestBB = cast<BasicBlock>(V);
+  } else if (ParseTypeAndBasicBlock(DestBB, PFS))
+    return true;
+  errs() << "destbb: " << DestBB << " V: " << V << "\n";
+  DestList.push_back(DestBB);
+
+  while (EatIfPresent(lltok::comma)) {
+    errs() << "Read comma" << "\n";
+    if (ParseTypeAndBasicBlock(DestBB, PFS))
+      return true;
+    DestList.push_back(DestBB);
+  }
+
+  if (ParseToken(lltok::rsquare, "expected ']' at end of block list"))
+    return true;
+
+  errs() << "Fork to be " << Values.size() << " : " << DestList.size() << "\n";
+  ForkInst *FI = ForkInst::Create(cast<ConstantInt>(ID), ForceParallel,
+                                  Interior, DestList.size() + Values.size());
+  errs() << "Fork created\n";
+  for (unsigned i = 0, e = Values.size(); i != e; ++i)
+    FI->addValue(Values[i]);
+  errs() << "values added \n";
+  for (unsigned i = 0, e = DestList.size(); i != e; ++i) {
+    errs() << "D: " << DestList[i] << "\n";
+    errs() << "D: " << *DestList[i] << "\n";
+    FI->addTask(DestList[i]);
+  }
+  errs() << "dest added \n";
+  Inst = FI;
+  return false;
+}
+
+/// ParseJoin
+///    ::= 'join' TypeAndValue, destBB
+bool LLParser::ParseJoin(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy IDLoc;
+  Value *ID;
+  if (ParseTypeAndValue(ID, IDLoc, PFS))
+    return true;
+
+  if (!ID->getType()->isIntegerTy())
+    return Error(IDLoc, "join id must have integer type");
+  if (!isa<ConstantInt>(ID))
+    return Error(IDLoc, "join id must be a constant");
+
+  if (ParseToken(lltok::comma, "expected ',' before destination block"))
+    return true;
+
+  BasicBlock *DestBB;
+  if (ParseTypeAndBasicBlock(DestBB, PFS))
+    return Error(IDLoc, "join needs a successor block");
+
+  Inst = JoinInst::Create(cast<ConstantInt>(ID), DestBB);
+  return false;
+}
+
+/// ParseHalt
+///    ::= 'halt' TypeAndValue
+bool LLParser::ParseHalt(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy IDLoc;
+  Value *ID;
+  if (ParseTypeAndValue(ID, IDLoc, PFS))
+    return true;
+
+  if (!ID->getType()->isIntegerTy())
+    return Error(IDLoc, "halt id must have integer type");
+  if (!isa<ConstantInt>(ID))
+    return Error(IDLoc, "halt id must be a constant");
+
+  Inst = HaltInst::Create(cast<ConstantInt>(ID));
   return false;
 }
 

@@ -821,6 +821,9 @@ public:
 
 private:
   // These all get lowered before this pass.
+  void visitFork(const ForkInst &I);
+  void visitJoin(const JoinInst &I);
+  void visitHalt(const HaltInst &I);
   void visitInvoke(const InvokeInst &I);
   void visitResume(const ResumeInst &I);
 

@@ -17,6 +17,7 @@
 #define LLVM_IR_INSTRUCTIONS_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/iterator_range.h"
@@ -3280,6 +3281,265 @@ struct OperandTraits<SwitchInst> : public HungoffOperandTraits<2> {
 };
 
 DEFINE_TRANSPARENT_OPERAND_ACCESSORS(SwitchInst, Value)
+
+//===----------------------------------------------------------------------===//
+//                               ForkInst Class
+//===----------------------------------------------------------------------===//
+
+//===---------------------------------------------------------------------------
+/// ForkInst - Task spawning fork instruction
+///
+class ForkInst : public TerminatorInst {
+  void *operator new(size_t, unsigned) = delete;
+  unsigned NumSuccessors;
+  unsigned ReservedSpace;
+  // Operand[0]    = Parallel Region ID
+  // Operand[n]    = Task entry block
+  ForkInst(const ForkInst &FI);
+  void init(ConstantInt *ID, unsigned NumReserved);
+  void growOperands();
+  // allocate space for exactly zero operands
+  void *operator new(size_t s) { return User::operator new(s); }
+
+  /// Flag to determine if the fork has to be parallelized.
+  bool ForceParallel;
+
+  /// Flag to determine if the fork is an interior fork.
+  bool Interior;
+
+  /// ForkInst ctor - Create a new fork instruction and specify the parallel
+  /// region ID as well as the number of expected targets to make memory
+  /// allocation more efficent. Also autoinsert before another instruction.
+  ForkInst(ConstantInt *ID, bool ForceParallel, bool Interior,
+           unsigned NumCases, Instruction *InsertBefore);
+
+  /// ForkInst ctor - Create a new fork instruction and specify the parallel
+  /// region ID as well as the number of expected targets to make memory
+  /// efficent. Also autoinsert at the end of the specified BasicBlock.
+  ForkInst(ConstantInt *ID, bool ForceParallel, bool Interior,
+           unsigned NumCases, BasicBlock *InsertAtEnd);
+
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  ForkInst *cloneImpl() const;
+
+public:
+  static ForkInst *Create(ConstantInt *Id, bool ForceParallel, bool Interior,
+                          unsigned NumCases,
+                          Instruction *InsertBefore = nullptr) {
+    return new ForkInst(Id, ForceParallel, Interior, NumCases, InsertBefore);
+  }
+  static ForkInst *Create(ConstantInt *Id, bool ForceParallel, bool Interior,
+                          unsigned NumCases, BasicBlock *InsertAtEnd) {
+    return new ForkInst(Id, ForceParallel, Interior, NumCases, InsertAtEnd);
+  }
+  ~ForkInst() override;
+
+  /// Provide fast operand accessors
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  /// Convenience accessor. Returns the Id of the parallel region.
+  ConstantInt *getParallelRegionId() const;
+
+  /// Check if the fork can be sequentialized.
+  bool canBeSequentialized() const { return !ForceParallel; }
+
+  /// Check if the fork is an interior fork.
+  bool isInterior() const { return Interior; }
+
+  /// addTask - Add a successor to the fork instruction.
+  void addTask(BasicBlock *Dest);
+
+  /// removeTask - This method removes the specified task as successor
+  /// from the fork instruction.
+  void removeTask(BasicBlock *Dest);
+
+  /// addValue - Add a value to the fork instruction.
+  void addValue(Value *V);
+
+  /// removeValue - Remove a value from the fork instruction.
+  void removeValue(Value *V);
+
+  /// Get the idx'th value.
+  Value *getValue(unsigned idx) const {
+    assert(idx + getNumSuccessors() + 1 < getNumOperands() &&
+           "Value idx out of range for fork!");
+    return cast<Value>(getOperand(idx + getNumSuccessors() + 1));
+  }
+
+  /// Return the number of associated values
+  unsigned getNumValues() const {
+    return getNumOperands() - getNumSuccessors() - 1;
+  }
+
+  unsigned getNumSuccessors() const { return NumSuccessors; }
+  BasicBlock *getSuccessor(unsigned idx) const {
+    assert(idx < getNumSuccessors() && "Successor idx out of range for fork!");
+    return cast<BasicBlock>(getOperand(idx + 1));
+  }
+  void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+    assert(idx < getNumSuccessors() && "Successor # out of range for fork!");
+    setOperand(idx + 1, (Value *)NewSucc);
+  }
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return I->getOpcode() == Instruction::Fork;
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+
+private:
+  BasicBlock *getSuccessorV(unsigned idx) const override;
+  unsigned getNumSuccessorsV() const override;
+  void setSuccessorV(unsigned idx, BasicBlock *B) override;
+};
+
+template <> struct OperandTraits<ForkInst> : public HungoffOperandTraits<1> {};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ForkInst, Value)
+
+//===----------------------------------------------------------------------===//
+//                               JoinInst Class
+//===----------------------------------------------------------------------===//
+
+//===---------------------------------------------------------------------------
+/// JoinInst - Join a concurrently running task.
+///
+class JoinInst : public TerminatorInst {
+  JoinInst(const JoinInst &JI);
+
+private:
+  explicit JoinInst(ConstantInt *Id, BasicBlock *Dest,
+                    Instruction *InsertBefore = nullptr);
+  explicit JoinInst(ConstantInt *Id, BasicBlock *Dest, BasicBlock *InsertAtEnd);
+
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  JoinInst *cloneImpl() const;
+
+public:
+  static JoinInst *Create(ConstantInt *Id, BasicBlock *Dest,
+                          Instruction *InsertBefore = nullptr) {
+    return new (2) JoinInst(Id, Dest, InsertBefore);
+  }
+  static JoinInst *Create(ConstantInt *Id, BasicBlock *Dest,
+                          BasicBlock *InsertAtEnd) {
+    return new (2) JoinInst(Id, Dest, InsertAtEnd);
+  }
+
+  /// Transparently provide more efficient getOperand methods.
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  /// Convenience accessor. Returns the Id of the parallel region.
+  ConstantInt *getParallelRegionId() const;
+
+  unsigned getNumSuccessors() const { return 1; }
+
+  BasicBlock *getSuccessor(unsigned idx) const { return getSuccessorV(idx); }
+
+  void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+    setSuccessorV(idx, NewSucc);
+  }
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return (I->getOpcode() == Instruction::Join);
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+
+private:
+  BasicBlock *getSuccessorV(unsigned idx) const override {
+    assert(idx == 0 && "Join has only one successor!");
+    return cast<BasicBlock>(Op<1>());
+  }
+
+  void setSuccessorV(unsigned idx, BasicBlock *B) override {
+    assert(idx == 0 && "Join has only one successor!");
+    Op<1>() = B;
+  }
+
+  unsigned getNumSuccessorsV() const override { return 1; }
+};
+
+template <>
+struct OperandTraits<JoinInst> : public FixedNumOperandTraits<JoinInst, 2> {};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(JoinInst, Value)
+
+//===----------------------------------------------------------------------===//
+//                               HaltInst Class
+//===----------------------------------------------------------------------===//
+
+//===---------------------------------------------------------------------------
+/// HaltInst - Halt a concurrently running task.
+///
+class HaltInst : public TerminatorInst {
+  HaltInst(const HaltInst &HI);
+
+private:
+  explicit HaltInst(ConstantInt *Id, Instruction *InsertBefore = nullptr);
+  explicit HaltInst(ConstantInt *Id, BasicBlock *InsertAtEnd);
+
+protected:
+  // Note: Instruction needs to be a friend here to call cloneImpl.
+  friend class Instruction;
+  HaltInst *cloneImpl() const;
+
+public:
+  static HaltInst *Create(ConstantInt *Id,
+                          Instruction *InsertBefore = nullptr) {
+    return new (1) HaltInst(Id, InsertBefore);
+  }
+  static HaltInst *Create(ConstantInt *Id, BasicBlock *InsertAtEnd) {
+    return new (1) HaltInst(Id, InsertAtEnd);
+  }
+
+  /// Transparently provide more efficient getOperand methods.
+  DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+  /// Convenience accessor. Returns the Id of the parallel region.
+  ConstantInt *getParallelRegionId() const;
+
+  unsigned getNumSuccessors() const { return 0; }
+
+  BasicBlock *getSuccessor(unsigned idx) const {
+    llvm_unreachable("Halt instruction has no successors.");
+  }
+
+  void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+    llvm_unreachable("Cannot set succor for halt instruction.");
+  }
+
+  // Methods for support type inquiry through isa, cast, and dyn_cast:
+  static inline bool classof(const Instruction *I) {
+    return (I->getOpcode() == Instruction::Halt);
+  }
+  static inline bool classof(const Value *V) {
+    return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+
+private:
+  BasicBlock *getSuccessorV(unsigned idx) const override {
+    llvm_unreachable("Halt instruction has no successors.");
+  }
+
+  void setSuccessorV(unsigned idx, BasicBlock *B) override {
+    llvm_unreachable("Cannot set succor for halt instruction.");
+  }
+
+  unsigned getNumSuccessorsV() const override { return 0; }
+};
+
+template <>
+struct OperandTraits<HaltInst> : public FixedNumOperandTraits<HaltInst, 1> {};
+
+DEFINE_TRANSPARENT_OPERAND_ACCESSORS(HaltInst, Value)
 
 //===----------------------------------------------------------------------===//
 //                             IndirectBrInst Class

@@ -2321,6 +2321,18 @@ void SelectionDAGBuilder::visitInvoke(const InvokeInst &I) {
                           DAG.getBasicBlock(Return)));
 }
 
+void SelectionDAGBuilder::visitFork(const ForkInst &FI) {
+  llvm_unreachable("SelectionDAGBuilder shouldn't visit fork instructions!");
+}
+
+void SelectionDAGBuilder::visitJoin(const JoinInst &JI) {
+  llvm_unreachable("SelectionDAGBuilder shouldn't visit join instructions!");
+}
+
+void SelectionDAGBuilder::visitHalt(const HaltInst &HI) {
+  llvm_unreachable("SelectionDAGBuilder shouldn't visit halt instructions!");
+}
+
 void SelectionDAGBuilder::visitResume(const ResumeInst &RI) {
   llvm_unreachable("SelectionDAGBuilder shouldn't visit resume instructions!");
 }

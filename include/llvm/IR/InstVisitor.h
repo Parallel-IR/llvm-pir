@@ -166,6 +166,9 @@ public:
   RetTy visitReturnInst(ReturnInst &I)            { DELEGATE(TerminatorInst);}
   RetTy visitBranchInst(BranchInst &I)            { DELEGATE(TerminatorInst);}
   RetTy visitSwitchInst(SwitchInst &I)            { DELEGATE(TerminatorInst);}
+  RetTy visitForkInst(ForkInst &I)                { DELEGATE(TerminatorInst);}
+  RetTy visitJoinInst(JoinInst &I)                { DELEGATE(TerminatorInst);}
+  RetTy visitHaltInst(HaltInst &I)                { DELEGATE(TerminatorInst);}
   RetTy visitIndirectBrInst(IndirectBrInst &I)    { DELEGATE(TerminatorInst);}
   RetTy visitResumeInst(ResumeInst &I)            { DELEGATE(TerminatorInst);}
   RetTy visitUnreachableInst(UnreachableInst &I)  { DELEGATE(TerminatorInst);}

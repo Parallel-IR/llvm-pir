@@ -403,12 +403,12 @@ enum FunctionCodes {
   FUNC_CODE_INST_BR = 11,     // BR:         [bb#, bb#, cond] or [bb#]
   FUNC_CODE_INST_SWITCH = 12, // SWITCH:     [opty, op0, op1, ...]
   FUNC_CODE_INST_INVOKE = 13, // INVOKE:     [attr, fnty, op0,op1, ...]
-  // 14 is unused.
+  FUNC_CODE_INST_FORK        = 14, // FORK:       [opval, bb0, ...]
   FUNC_CODE_INST_UNREACHABLE = 15, // UNREACHABLE
 
   FUNC_CODE_INST_PHI = 16, // PHI:        [ty, val0,bb0, ...]
-  // 17 is unused.
-  // 18 is unused.
+  FUNC_CODE_INST_JOIN = 17, // JOIN:       [opval, destBB]
+  FUNC_CODE_INST_HALT = 18, // HALT:       [opval]
   FUNC_CODE_INST_ALLOCA = 19, // ALLOCA:     [instty, opty, op, align]
   FUNC_CODE_INST_LOAD = 20,   // LOAD:       [opty, op, align, vol]
   // 21 is unused.

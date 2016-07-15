@@ -211,6 +211,9 @@ enum Kind {
   kw_type,
   kw_opaque,
 
+  kw_force,
+  kw_interior,
+
   kw_comdat,
 
   // Comdat types
@@ -307,6 +310,9 @@ enum Kind {
   kw_catchret,
   kw_catchpad,
   kw_cleanuppad,
+  kw_fork,
+  kw_join,
+  kw_halt,
 
   kw_alloca,
   kw_load,

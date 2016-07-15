@@ -106,6 +106,9 @@ typedef enum {
   LLVMSwitch         = 3,
   LLVMIndirectBr     = 4,
   LLVMInvoke         = 5,
+  LLVMFork           = 90,
+  LLVMJoin           = 91,
+  LLVMHalt           = 92,
   /* removed 6 due to API changes */
   LLVMUnreachable    = 7,
 

@@ -5059,6 +5059,67 @@ std::error_code BitcodeReader::parseFunctionBody(Function *F) {
       I = SI;
       break;
     }
+    case bitc::FUNC_CODE_INST_FORK: { // FORK: [idty, id, force, interior, v0, ..., bb0, ...]
+      if (Record.size() < 2)
+        return error("Invalid record f0");
+      Type *OpTy = getTypeByID(Record[0]);
+      Value *ID = getValue(Record, 1, NextValueNo, OpTy);
+      if (!OpTy || !ID)
+        return error("Invalid record f1");
+      if (!isa<ConstantInt>(ID))
+        return error("Fork parallel region ID needs to be a constant integer.");
+      bool Force = Record[2];
+      bool Interior = Record[3];
+      unsigned NumDests = Record.size()-4;
+      ForkInst *FI = ForkInst::Create(cast<ConstantInt>(ID), Force, Interior, NumDests);
+      InstructionList.push_back(FI);
+      unsigned i = 0;
+      for (; i != NumDests; ++i) {
+        Type *VTy = getTypeByID(Record[4 + i]);
+        if (!VTy)
+          break;
+        Value *V = getValue(Record, 5 + i, NextValueNo, VTy);
+        if (!V)
+          return error("Invalid record f4");
+        FI->addValue(V);
+      }
+      for (; i != NumDests; ++i) {
+        if (BasicBlock *DestBB = getBasicBlock(Record[4+i]))
+          FI->addTask(DestBB);
+        else
+          return error("Invalid record f5");
+      }
+      I = FI;
+      break;
+    }
+    case bitc::FUNC_CODE_INST_JOIN: { // JOIN: [idty id, dest]
+      if (Record.size() != 3)
+        return error("Invalid record J0");
+      Type *OpTy = getTypeByID(Record[0]);
+      Value *ID = getValue(Record, 1, NextValueNo, OpTy);
+      if (!OpTy || !ID)
+        return error("Invalid record j1");
+      if (!isa<ConstantInt>(ID))
+        return error("Join parallel region ID needs to be a constant integer.");
+      BasicBlock *DestBB = getBasicBlock(Record[2]);
+      if (!DestBB)
+        return error("Invalid record j2");
+      I = JoinInst::Create(cast<ConstantInt>(ID), DestBB);
+      break;
+    }
+    case bitc::FUNC_CODE_INST_HALT: { // HALT: [idty id]
+      if (Record.size() != 2)
+        return error("Invalid record J0");
+      Type *OpTy = getTypeByID(Record[0]);
+      Value *ID = getValue(Record, 1, NextValueNo, OpTy);
+      if (!OpTy || !ID)
+        return error("Invalid record j1");
+      if (!isa<ConstantInt>(ID))
+        return error("Join parallel region ID needs to be a constant integer.");
+      I = HaltInst::Create(cast<ConstantInt>(ID));
+      break;
+    }
+
     case bitc::FUNC_CODE_INST_INDIRECTBR: { // INDIRECTBR: [opty, op0, op1, ...]
       if (Record.size() < 2)
         return error("Invalid record");

@@ -2420,6 +2420,38 @@ void ModuleBitcodeWriter::writeInstruction(const Instruction &I,
       }
     }
     break;
+  case Instruction::Fork:
+    {
+      Code = bitc::FUNC_CODE_INST_FORK;
+      const ForkInst &FI = cast<ForkInst>(I);
+      Vals.push_back(VE.getTypeID(FI.getParallelRegionId()->getType()));
+      pushValue(FI.getParallelRegionId(), InstID, Vals);
+      Vals.push_back(!FI.canBeSequentialized());
+      Vals.push_back(FI.isInterior());
+      for (unsigned i = 0, e = FI.getNumValues(); i != e; ++i)
+        Vals.push_back(VE.getValueID(FI.getValue(i)));
+      for (unsigned i = 1, e = I.getNumOperands(); i != e; ++i)
+        Vals.push_back(VE.getValueID(I.getOperand(i)));
+    }
+    break;
+
+  case Instruction::Join: {
+    Code = bitc::FUNC_CODE_INST_JOIN;
+    const JoinInst &JI = cast<JoinInst>(I);
+    Vals.push_back(VE.getTypeID(JI.getParallelRegionId()->getType()));
+    pushValue(JI.getParallelRegionId(), InstID, Vals);
+    Vals.push_back(VE.getValueID(JI.getSuccessor(0)));
+    break;
+  }
+
+  case Instruction::Halt: {
+    Code = bitc::FUNC_CODE_INST_HALT;
+    const HaltInst &JI = cast<HaltInst>(I);
+    Vals.push_back(VE.getTypeID(JI.getParallelRegionId()->getType()));
+    pushValue(JI.getParallelRegionId(), InstID, Vals);
+    break;
+  }
+
   case Instruction::IndirectBr:
     Code = bitc::FUNC_CODE_INST_INDIRECTBR;
     Vals.push_back(VE.getTypeID(I.getOperand(0)->getType()));
