@@ -581,6 +581,12 @@ void SCCPSolver::getFeasibleSuccessors(TerminatorInst &TI,
     return;
   }
 
+  if (TI.isParallelismRelated()) {
+    // Mark all destinations executable!
+    Succs.assign(TI.getNumSuccessors(), true);
+    return;
+  }
+
 #ifndef NDEBUG
   dbgs() << "Unknown terminator instruction: " << TI << '\n';
 #endif
@@ -635,6 +641,9 @@ bool SCCPSolver::isEdgeFeasible(BasicBlock *From, BasicBlock *To) {
   // Just mark all destinations executable!
   // TODO: This could be improved if the operand is a [cast of a] BlockAddress.
   if (isa<IndirectBrInst>(TI))
+    return true;
+
+  if (TI->isParallelismRelated())
     return true;
 
 #ifndef NDEBUG

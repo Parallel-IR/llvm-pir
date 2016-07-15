@@ -107,6 +107,9 @@ bool llvm::MergeBlockIntoPredecessor(BasicBlock *BB, DominatorTree *DT,
   // Don't break unwinding instructions.
   if (PredBB->getTerminator()->isExceptional())
     return false;
+  // Don't break parallel tasks.
+  if (PredBB->getTerminator()->isParallelismRelated())
+    return false;
 
   succ_iterator SI(succ_begin(PredBB)), SE(succ_end(PredBB));
   BasicBlock *OnlySucc = BB;
