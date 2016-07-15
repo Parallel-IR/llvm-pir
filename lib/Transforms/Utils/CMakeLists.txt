@@ -32,6 +32,9 @@ add_llvm_library(LLVMTransformUtils
   MetaRenamer.cpp
   ModuleUtils.cpp
   NameAnonFunctions.cpp
+
+  ParallelUtils.cpp
+
   PromoteMemoryToRegister.cpp
   SSAUpdater.cpp
   SanitizerStats.cpp
