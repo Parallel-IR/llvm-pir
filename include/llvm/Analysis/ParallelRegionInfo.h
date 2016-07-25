@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/Pass.h"
 
 namespace llvm {
@@ -24,7 +25,7 @@ class ParallelRegionInfo;
 class ParallelRegion {
 public:
   ParallelRegion(ParallelRegionInfo *RI, DominatorTree *DT, unsigned id,
-                 ParallelRegion *Parent = nullptr);
+                 ForkInst* Fork, ParallelRegion *Parent = nullptr);
   ~ParallelRegion();
 
   friend class ParallelRegionInfo;
@@ -61,7 +62,19 @@ public:
   const SmallVectorImpl<BasicBlock *> &getBlocks() const { return Blocks; }
   SmallVectorImpl<BasicBlock *> &getBlocksVector() { return Blocks; }
 
+  const SmallVectorImpl<BasicBlock *> &getExitBlocks() const {
+    return ExitBlocks;
+  }
+  SmallVectorImpl<BasicBlock *> &getExitBlocks() { return ExitBlocks; }
+
+  const SmallVectorImpl<BasicBlock *> &getEntryBlocks() const {
+    return EntryBlocks;
+  }
+  SmallVectorImpl<BasicBlock *> &getEntryBlocks() { return EntryBlocks; }
+
   void addSubRegion(ParallelRegion *sub) { SubRegions.emplace_back(sub); }
+
+  ForkInst* getEntryFork() { return Fork; }
 
   typedef typename SmallVectorImpl<ParallelRegion *>::const_iterator iterator;
   typedef typename SmallVectorImpl<ParallelRegion *>::const_reverse_iterator
@@ -73,6 +86,7 @@ public:
   bool empty() const { return SubRegions.empty(); }
 
 private:
+  ForkInst *Fork;
   ParallelRegion *Parent;
   unsigned ParallelRegionID;
   SmallVector<ParallelRegion *, 32> SubRegions;
@@ -86,6 +100,7 @@ class ParallelRegionInfo {
 
 public:
   SmallVector<ParallelRegion *, 32> TopLevelRegions;
+  DenseMap<BasicBlock *, ParallelRegion *> BB2PRMap;
 
   explicit ParallelRegionInfo();
 
@@ -98,6 +113,11 @@ public:
   void releaseMemory();
 
   void recalculate(Function &F, DominatorTree *DT);
+
+  ParallelRegion* getForkedRegion(Instruction *);
+
+private:
+  DenseMap<Instruction *, ParallelRegion *> Fork2PRMap;
 };
 
 class ParallelRegionInfoPass : public FunctionPass {

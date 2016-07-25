@@ -30,8 +30,8 @@ STATISTIC(NumParallelRegions, "The # of parallel regions");
 //
 
 ParallelRegion::ParallelRegion(ParallelRegionInfo *RI, DominatorTree *DT,
-                               unsigned id, ParallelRegion *parent)
-    : Parent(parent), ParallelRegionID(id) {}
+                               unsigned id, ForkInst* fork, ParallelRegion *parent)
+    : Fork(fork), Parent(parent), ParallelRegionID(id) {}
 
 ParallelRegion::~ParallelRegion() {
   /* NOTE: This assumes subegions are only subegions of depth 1 less
@@ -57,8 +57,11 @@ void ParallelRegionInfo::releaseMemory() {
 
 void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
   DenseMap<BasicBlock *, ParallelRegion *> BB2PRMap;
+  unsigned regionID = 1;
   std::deque<BasicBlock *> OpenBlocks;
   DenseSet<BasicBlock *> SeenBlocks;
+  BB2PRMap.clear();
+  Fork2PRMap.clear();
 
   BasicBlock *EntryBB = &F.getEntryBlock();
   OpenBlocks.push_back(EntryBB);
@@ -71,26 +74,32 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
       continue;
 
     ParallelRegion *curPR = BB2PRMap[BB];
-    ForkInst *FI = dyn_cast<ForkInst>(BB->getTerminator());
 
-    if (FI) {
-      unsigned ForkId = FI->getParallelRegionId()->getZExtValue();
-      ParallelRegion *subRegion = new ParallelRegion(this, DT, ForkId, curPR);
-      NextParallelRegionId = std::max(NextParallelRegionId, ForkId + 1);
+    // TODO: Add halt case as exit block.
+    if (curPR && dyn_cast<ReturnInst>(BB->getTerminator())) {
+      curPR->addExitBlockToRegion(BB);
+    }
+
+    ForkInst *FI = dyn_cast<ForkInst>(BB->getTerminator());
+    if (FI && !(FI->isInterior())) {
+      ParallelRegion *subRegion = new ParallelRegion(this, DT, regionID,
+                                                     FI, curPR);
+      ++regionID;
+
       if (!curPR) {
         TopLevelRegions.push_back(subRegion);
       } else {
         curPR->addSubRegion(subRegion);
       }
       curPR = subRegion;
+      Fork2PRMap[FI] = subRegion;
     }
 
     for (BasicBlock *SuccBB : successors(BB)) {
       BB2PRMap[SuccBB] = curPR;
-
       OpenBlocks.push_back(SuccBB);
 
-      if (dyn_cast<JoinInst>(SuccBB->getTerminator())) {
+      if (dyn_cast<JoinInst>(SuccBB->front())) {
         assert(curPR && "Join instruction outside of a parallel region.");
         assert(!BB2PRMap.count(SuccBB) || (BB2PRMap[SuccBB] == curPR->Parent &&
                                            "Inconsistent CFG, paths to the "
@@ -137,6 +146,10 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
     }
     errs() << "\n";
   }
+}
+
+ParallelRegion *ParallelRegionInfo::getForkedRegion(Instruction *I) {
+  return Fork2PRMap[I];
 }
 
 //===----------------------------------------------------------------------===//

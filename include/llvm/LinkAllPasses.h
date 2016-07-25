@@ -46,6 +46,7 @@
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
+#include "llvm/Transforms/Utils/ParallelUtils.h"
 #include "llvm/Transforms/Vectorize.h"
 #include "llvm/Support/Valgrind.h"
 #include <cstdlib>
@@ -146,6 +147,7 @@ namespace {
       (void) llvm::createRegionPrinterPass();
       (void) llvm::createRegionViewerPass();
       (void) llvm::createParallelRegionInfoPass();
+      (void) llvm::createSequentializeParallelRegionsPass();
       (void) llvm::createSCCPPass();
       (void) llvm::createSafeStackPass();
       (void) llvm::createSROAPass();
