@@ -56,7 +56,6 @@ void ParallelRegionInfo::releaseMemory() {
 }
 
 void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
-  DenseMap<BasicBlock *, ParallelRegion *> BB2PRMap;
   unsigned regionID = 1;
   std::deque<BasicBlock *> OpenBlocks;
   DenseSet<BasicBlock *> SeenBlocks;
@@ -75,8 +74,8 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
 
     ParallelRegion *curPR = BB2PRMap[BB];
 
-    // TODO: Add halt case as exit block.
-    if (curPR && dyn_cast<ReturnInst>(BB->getTerminator())) {
+    if (curPR && (isa<ReturnInst>(BB->getTerminator()) || 
+                  isa<HaltInst>(BB->getTerminator()))) {
       curPR->addExitBlockToRegion(BB);
     }
 
@@ -99,7 +98,7 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
       BB2PRMap[SuccBB] = curPR;
       OpenBlocks.push_back(SuccBB);
 
-      if (dyn_cast<JoinInst>(SuccBB->front())) {
+      if (isa<JoinInst>(SuccBB->front())) {
         assert(curPR && "Join instruction outside of a parallel region.");
         assert(!BB2PRMap.count(SuccBB) || (BB2PRMap[SuccBB] == curPR->Parent &&
                                            "Inconsistent CFG, paths to the "

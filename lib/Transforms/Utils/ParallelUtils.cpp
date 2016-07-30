@@ -65,6 +65,20 @@ bool SequentializeParallelRegions::runOnFunction(Function &F) {
     }
 
     SmallVectorImpl<BasicBlock *> &Entrys = PR->getEntryBlocks();
+    for (unsigned i = 0; i < Entrys.size(); ++i) {
+      if (isa<JoinInst>(Entrys[i]->begin())) {
+        assert(!Region2EntryJoin.count(PR) && "Do not handle duplicate fork"
+                                              "destinations yet");
+        // TODO: Remove additional branches that go directly to join.
+        // Easier if removeTask interface for ForkInst is modified.
+        Region2EntryJoin[PR] = i;
+      }
+    }
+
+    if (!Region2EntryJoin.count(PR)) {
+      Region2EntryJoin[PR] = 0;
+    }
+  
     for (BasicBlock *Exit : PR->getExitBlocks()) {
       for (unsigned i = 0; i < Entrys.size(); ++i) {
         if (DT->dominates(Entrys[i], Exit)) {
@@ -73,21 +87,12 @@ bool SequentializeParallelRegions::runOnFunction(Function &F) {
       }
       assert(Exit2Entry.count(Exit) || isa<ForkInst>(Exit->getTerminator()));
 
-      // TODO: Replace second condition with checking terminator for halt
-      if (!Region2EntryJoin.count(PR) && true) {
-        Region2EntryJoin[PR] = Exit2Entry[Exit];
-      }
-    }
-
-    // If fork jumps directly to a join, that should be the last branch taken.
-    // TODO: Figure out how to make this not a speccial case.
-    for (unsigned i = 0; i < Entrys.size(); ++i) {
-      if (isa<JoinInst>(Entrys[i]->begin())) {
-        Region2EntryJoin[PR] = i;
+      if (isa<HaltInst>(Exit->getTerminator()) && 
+          Region2EntryJoin[PR] == Exit2Entry[Exit]) {
+        Region2EntryJoin[PR] = (Region2EntryJoin[PR] + 1) % Entrys.size();
       }
     }
   }
-
 
   OpenBlocks.push_back(&F.getEntryBlock());
   while (!OpenBlocks.empty()) {
@@ -104,58 +109,67 @@ bool SequentializeParallelRegions::runOnFunction(Function &F) {
     // the one that will exit.
     // TODO: Handle fork interior.
     ForkInst *fork = dyn_cast<ForkInst>(BB->getTerminator());
+
     if (fork) {
       PR = PRI->getForkedRegion(fork);
-      assert(PR);
-      SmallVectorImpl<BasicBlock *> &Entrys = PR->getEntryBlocks();
+      SmallVectorImpl<BasicBlock *> &SubEntrys = PR->getEntryBlocks();
       unsigned NewEntry = (Region2EntryJoin[PR] + 1)
-        % Entrys.size();
-      BranchInst::Create(Entrys[NewEntry], BB->getTerminator());
-      OpenBlocks.push_back(Entrys[NewEntry]);
+        % SubEntrys.size();
+      BranchInst::Create(SubEntrys[NewEntry], BB->getTerminator());
       // Fork instructions deleted later
     }
 
-    // TODO: Check for halt.
-    // Then, we check if the last instruction of the block is a halt.
+    SmallVectorImpl<BasicBlock *> &Entrys = PR->getEntryBlocks();
+
+    // Check if the last instruction of the block is a halt.
     // If it is, we change it to a jump to the next entry block.
-    // To prevent infinite loops, will need to change one to unreachable inst
+    // TODO: To prevent infinite loops, will need to change one to unreachable
     // if all branches lead to halt.
+    if (isa<HaltInst>(BB->getTerminator())) {
+      assert(Exit2Entry.count(BB) && "Halt in non-exit block");
+      unsigned EntryNum = Exit2Entry[BB];
+      assert(EntryNum != Region2EntryJoin[PR]);
+
+      EntryNum = (EntryNum + 1) % (Entrys.size());
+
+      BranchInst::Create(Entrys[EntryNum], BB->getTerminator());
+      BB->getTerminator()->eraseFromParent();
+      continue;
+    }
 
     // Otherwise, we check if the first instruction of each next block is join.
     // If it is, we change to a jump to the next remaining entry block
     // if this is not the instruction that will leave the entry block.
-    BranchInst *Branch = dyn_cast<BranchInst>(BB->getTerminator());
-    if (Branch) {
-      SmallVectorImpl<BasicBlock *> &Entrys = PR->getEntryBlocks();
-      for (unsigned idx = 0; idx < Branch->getNumSuccessors(); idx++) {
-        if (dyn_cast<JoinInst>(&Branch->getSuccessor(idx)->front())) {
-          assert(PR && "Join instruction must be inside a basic block");
-          unsigned EntryNum = Exit2Entry[BB];
-          if (EntryNum != Region2EntryJoin[PR]) {
-            unsigned nextBlock = (EntryNum + 1) % Entrys.size();
-            Branch->setSuccessor(idx, Entrys[nextBlock]);
+    TerminatorInst *Branch = BB->getTerminator();
+    for (unsigned idx = 0; idx < Branch->getNumSuccessors(); idx++) {
+      JoinInst *join = dyn_cast<JoinInst>(&Branch->getSuccessor(idx)->front());
+      if (join) {
+        assert(PR && "Join instruction must be inside a basic block");
+        unsigned EntryNum = Exit2Entry[BB];
+        if (EntryNum != Region2EntryJoin[PR]) {
+          EntryNum = (EntryNum + 1) % Entrys.size();
+          Branch->setSuccessor(idx, Entrys[EntryNum]);
 
-            // TODO: Handle PHI nodes
-            for (BasicBlock::iterator I = Entrys[nextBlock]->begin();
-                 isa<PHINode>(I); ++I) {
-              PHINode *PN = cast<PHINode>(I);
-              PN->addIncoming(PN->getIncomingValueForBlock(
-                              PR->getEntryFork()->getParent()), BB);
-            }
-
+          for (BasicBlock::iterator I = Entrys[EntryNum]->begin();
+               isa<PHINode>(I); ++I) {
+            PHINode *PN = cast<PHINode>(I);
+            PN->addIncoming(PN->getIncomingValueForBlock(
+                            PR->getEntryFork()->getParent()), BB);
           }
         }
-        OpenBlocks.push_back(Branch->getSuccessor(idx));
       }
+      OpenBlocks.push_back(Branch->getSuccessor(idx));
     }
-  }
 
+  }
 
   // Have to wait to delete join and fork instructions
   // because they are used to determine when a parallel region ends.
   ForkInst *FI;
+  JoinInst *JI;
   for (auto iter = F.begin(); iter != F.end(); ++iter) {
-    if (dyn_cast<JoinInst>(iter->begin())) {
+    if ((JI = dyn_cast<JoinInst>(iter->begin()))) {
+      BranchInst::Create(JI->getSuccessor(0), &*iter);
       iter->begin()->eraseFromParent();
     }
 
