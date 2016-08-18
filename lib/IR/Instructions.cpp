@@ -3841,7 +3841,9 @@ ForkInst::ForkInst(const ForkInst &FI)
     : TerminatorInst(FI.getType(), Instruction::Fork, nullptr, 0),
       NumSuccessors(FI.NumSuccessors), ForceParallel(FI.ForceParallel),
       Interior(FI.Interior) {
-  setNumHungOffUseOperands(FI.getNumOperands());
+  ReservedSpace = FI.getNumOperands();
+  setNumHungOffUseOperands(ReservedSpace);
+  allocHungoffUses(ReservedSpace);
   Use *OL = getOperandList();
   const Use *InOL = FI.getOperandList();
   for (unsigned i = 0, E = FI.getNumOperands(); i != E; ++i)
@@ -3954,7 +3956,7 @@ JoinInst::JoinInst(ConstantInt *Id, BasicBlock *Dest, BasicBlock *InsertAtEnd)
 }
 
 JoinInst::JoinInst(const JoinInst &JI)
-    : TerminatorInst(JI.getType(), Instruction::Join, nullptr, 0) {
+    : TerminatorInst(JI.getType(), Instruction::Join, nullptr, 2) {
   Op<0>() = JI.Op<0>();
   Op<1>() = JI.Op<1>();
   SubclassOptionalData = JI.SubclassOptionalData;
