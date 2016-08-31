@@ -95,9 +95,6 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
     }
 
     for (BasicBlock *SuccBB : successors(BB)) {
-      BB2PRMap[SuccBB] = curPR;
-      OpenBlocks.push_back(SuccBB);
-
       if (isa<JoinInst>(SuccBB->front())) {
         assert(curPR && "Join instruction outside of a parallel region.");
         assert(!BB2PRMap.count(SuccBB) || (BB2PRMap[SuccBB] == curPR->Parent &&
@@ -105,11 +102,14 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
                                            "same join with different depths."));
         curPR->addExitBlockToRegion(BB);
         BB2PRMap[SuccBB] = curPR->Parent;
+      } else {
+        BB2PRMap[SuccBB] = curPR;
       }
 
       if (FI) {
         curPR->addEntryBlockToRegion(SuccBB);
       }
+      OpenBlocks.push_back(SuccBB);
     }
   }
 

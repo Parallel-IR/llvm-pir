@@ -27,6 +27,16 @@ using namespace llvm;
 
 #define DEBUG_TYPE "parallel-utils"
 
+void removeFalsePredecessor(BasicBlock *removeFrom, BasicBlock *remove) {
+  for (BasicBlock::iterator I = removeFrom->begin(); isa<PHINode>(I);) {
+    PHINode *PN = cast<PHINode>(I);
+    ++I;
+    assert(PN->getBasicBlockIndex(remove) >= 0 &&
+           "Even though not a predecessor, still in PHI.");
+    PN->removeIncomingValue(remove);
+  }
+}
+
 SequentializeParallelRegions::SequentializeParallelRegions() :
   FunctionPass(ID) {
   initializeSequentializeParallelRegionsPass(*PassRegistry::getPassRegistry());
@@ -233,7 +243,7 @@ BasicBlock *SequentializeRegion(BasicBlock *regionStart) {
               if (vmap->count(SubSucc)) {
                 BasicBlock *copy = dyn_cast<BasicBlock>((*vmap)[SubSucc]);
                 if (copy) {
-                  copy->removePredecessor(successor, true);
+                  removeFalsePredecessor(copy, successor);
                 }
               }
             }
@@ -283,7 +293,7 @@ BasicBlock *SequentializeRegion(BasicBlock *regionStart) {
   // Only the first EntryBlock is visited by regionStart, so clear up PHIs.
   // Don't do this until all of the new predecessors have added their PHIs 
   for (unsigned idx = 1; idx < EntryBlocks.size(); idx++) {
-    EntryBlocks[idx]->removePredecessor(regionStart);
+    removeFalsePredecessor(EntryBlocks[idx], regionStart);
   }
 
   // Rewire regionStart to point to the first entry.
