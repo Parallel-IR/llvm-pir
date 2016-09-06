@@ -15,6 +15,7 @@
 #define LLVM_TRANSFORMS_UTILS_PARALLELUTILS_H
 
 #include "llvm/Pass.h"
+#include "llvm/IR/Instruction.h"
 
 namespace llvm {
 
@@ -40,6 +41,35 @@ public:
   void print(raw_ostream &, const Module *) const override;
   void dump() const;
   //@}
+};
+
+//===----------------------------------------------------------------------===//
+//
+// OpenMPParallelRegions - This pass converts all parallel regions to use
+// openMP task-based parallelism.
+//
+FunctionPass *createOpenMPParallelTasksPass();
+
+class OpenMPParallelTasks : public FunctionPass {
+public:
+  static char ID;
+  explicit OpenMPParallelTasks();
+
+  ~OpenMPParallelTasks() override;
+
+  /// @name FunctionPass interface
+  //@{
+  bool runOnFunction(Function&) override;
+  void releaseMemory() override;
+  void getAnalysisUsage(AnalysisUsage&) const override;
+  void print(raw_ostream &, const Module *) const override;
+  void dump() const;
+  //@}
+
+private:
+  Instruction *CreateHeader(BasicBlock *);
+  Instruction *CreateNextRegion(BasicBlock *);
+  BasicBlock *CreateTasks(BasicBlock *);
 };
 
 }

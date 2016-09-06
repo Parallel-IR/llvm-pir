@@ -148,6 +148,7 @@ namespace {
       (void) llvm::createRegionViewerPass();
       (void) llvm::createParallelRegionInfoPass();
       (void) llvm::createSequentializeParallelRegionsPass();
+      (void) llvm::createOpenMPParallelTasksPass();
       (void) llvm::createSCCPPass();
       (void) llvm::createSafeStackPass();
       (void) llvm::createSROAPass();

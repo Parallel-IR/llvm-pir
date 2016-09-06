@@ -244,6 +244,7 @@ void initializeObjCARCOptPass(PassRegistry&);
 void initializeOptimizePHIsPass(PassRegistry&);
 void initializeParallelRegionInfoPassPass(PassRegistry&);
 void initializeSequentializeParallelRegionsPass(PassRegistry&);
+void initializeOpenMPParallelTasksPass(PassRegistry&);
 void initializePAEvalPass(PassRegistry &);
 void initializePEIPass(PassRegistry&);
 void initializePGOIndirectCallPromotionLegacyPassPass(PassRegistry&);
