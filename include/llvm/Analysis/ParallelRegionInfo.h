@@ -24,7 +24,7 @@ class ParallelRegionInfo;
 
 class ParallelRegion {
 public:
-  ParallelRegion(ParallelRegionInfo *RI, DominatorTree *DT, unsigned id,
+  ParallelRegion(ParallelRegionInfo *RI, DominatorTree *DT, ConstantInt *Id,
                  ForkInst* Fork, ParallelRegion *Parent = nullptr);
   ~ParallelRegion();
 
@@ -39,7 +39,7 @@ public:
     return D;
   }
 
-  unsigned getId() const { return ParallelRegionID; }
+  ConstantInt *getId() const { return ParallelRegionID; }
   ParallelRegion *getParentRegion() const { return Parent; }
   void setParentRegion(ParallelRegion *P) { Parent = P; }
 
@@ -88,7 +88,7 @@ public:
 private:
   ForkInst *Fork;
   ParallelRegion *Parent;
-  unsigned ParallelRegionID;
+  ConstantInt *ParallelRegionID;
   SmallVector<ParallelRegion *, 32> SubRegions;
   SmallVector<BasicBlock *, 32> Blocks;
   SmallVector<BasicBlock *, 2> EntryBlocks;

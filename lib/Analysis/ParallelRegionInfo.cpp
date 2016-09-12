@@ -30,8 +30,9 @@ STATISTIC(NumParallelRegions, "The # of parallel regions");
 //
 
 ParallelRegion::ParallelRegion(ParallelRegionInfo *RI, DominatorTree *DT,
-                               unsigned id, ForkInst* fork, ParallelRegion *parent)
-    : Fork(fork), Parent(parent), ParallelRegionID(id) {}
+                               ConstantInt *Id, ForkInst *fork,
+                               ParallelRegion *parent)
+    : Fork(fork), Parent(parent), ParallelRegionID(Id) {}
 
 ParallelRegion::~ParallelRegion() {
   /* NOTE: This assumes subegions are only subegions of depth 1 less
@@ -56,7 +57,6 @@ void ParallelRegionInfo::releaseMemory() {
 }
 
 void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
-  unsigned regionID = 1;
   std::deque<BasicBlock *> OpenBlocks;
   DenseSet<BasicBlock *> SeenBlocks;
   BB2PRMap.clear();
@@ -81,10 +81,8 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
 
     ForkInst *FI = dyn_cast<ForkInst>(BB->getTerminator());
     if (FI && !(FI->isInterior())) {
-      ParallelRegion *subRegion = new ParallelRegion(this, DT, regionID,
-                                                     FI, curPR);
-      ++regionID;
-
+      ParallelRegion *subRegion =
+          new ParallelRegion(this, DT, FI->getParallelRegionId(), FI, curPR);
       if (!curPR) {
         TopLevelRegions.push_back(subRegion);
       } else {
