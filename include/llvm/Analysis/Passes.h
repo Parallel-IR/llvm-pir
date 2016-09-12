@@ -79,13 +79,6 @@ namespace llvm {
   //
   FunctionPass *createRegionInfoPass();
 
-  //===--------------------------------------------------------------------===//
-  //
-  // createParallelRegionInfoPass - This pass finds all parallel regions
-  // in a function and builds the parallel region hierarchy.
-  //
-  FunctionPass *createParallelRegionInfoPass();
-
   // Print module-level debug info metadata in human-readable form.
   ModulePass *createModuleDebugInfoPrinterPass();
 

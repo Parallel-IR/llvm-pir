@@ -1,4 +1,4 @@
-//===- ParallelParallelRegionInfo.h - Parallel region analysis --*- C++ -*-===//
+//===- PIR/ParallelRegionInfo.h --- Parallel region analysis --*- C++ -*---===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -9,8 +9,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_PARALLELREGIONINFO_H
-#define LLVM_ANALYSIS_PARALLELREGIONINFO_H
+#ifndef LLVM_PIR_PARALLELREGIONINFO_H
+#define LLVM_PIR_PARALLELREGIONINFO_H
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"

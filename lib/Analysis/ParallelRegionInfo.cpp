@@ -74,7 +74,7 @@ void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
 
     ParallelRegion *curPR = BB2PRMap[BB];
 
-    if (curPR && (isa<ReturnInst>(BB->getTerminator()) || 
+    if (curPR && (isa<ReturnInst>(BB->getTerminator()) ||
                   isa<HaltInst>(BB->getTerminator()))) {
       curPR->addExitBlockToRegion(BB);
     }

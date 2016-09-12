@@ -1,4 +1,4 @@
-//===- PIR/Utils/ParallelUtils.cpp - Parallel IR Utility functions --------===//
+//===-- Parallelize.cpp ---------------------------------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -7,13 +7,14 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines common parallel utility functions.
-//
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/Utils/ParallelUtils.h"
-
+#include "llvm/Transforms/Parallelize.h"
 
 using namespace llvm;
 
-#define DEBUG_TYPE "parallel-utils"
+void initializeParallelization(PassRegistry &Registry) {
+  initializeParallelRegionInfoPassPass(Registry);
+  initializeSequentializeParallelRegionsPass(Registry);
+  initializeOpenMPParallelTasksPass(Registry);
+}

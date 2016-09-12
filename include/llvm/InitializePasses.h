@@ -34,6 +34,9 @@ void initializeObjCARCOpts(PassRegistry&);
 /// Initialize all passes linked into the Vectorize library.
 void initializeVectorization(PassRegistry&);
 
+/// Initialize all passes linked into the Parallelize library.
+void initializeParallelization(PassRegistry&);
+
 /// Initialize all passes linked into the InstCombine library.
 void initializeInstCombine(PassRegistry&);
 

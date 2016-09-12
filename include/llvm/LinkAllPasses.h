@@ -46,7 +46,7 @@
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include "llvm/Transforms/Utils/UnifyFunctionExitNodes.h"
-#include "llvm/Transforms/Utils/ParallelUtils.h"
+#include "llvm/Transforms/Parallelize.h"
 #include "llvm/Transforms/Vectorize.h"
 #include "llvm/Support/Valgrind.h"
 #include <cstdlib>
