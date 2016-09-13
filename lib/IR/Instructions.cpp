@@ -3894,12 +3894,10 @@ void ForkInst::addTask(BasicBlock *Dest) {
   if (OpNo + 1 > ReservedSpace)
     growOperands(); // Get more space!
   // Initialize some new operands.
-  errs() << "OpNo: " << OpNo << " : NS: " << NumSuccessors << "\n";
   assert(OpNo < ReservedSpace && "Growing didn't work!");
   setNumHungOffUseOperands(OpNo + 1);
   // Move a value to the end if needed.
   if (OpNo - 1 > NumSuccessors) {
-    errs() << "move\n";
     OL[OpNo] = OL[NumSuccessors + 1];
   }
   OL[1 + NumSuccessors++] = Dest;

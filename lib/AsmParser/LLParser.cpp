@@ -5254,11 +5254,9 @@ bool LLParser::ParseFork(Instruction *&Inst, PerFunctionState &PFS) {
     DestBB = cast<BasicBlock>(V);
   } else if (ParseTypeAndBasicBlock(DestBB, PFS))
     return true;
-  errs() << "destbb: " << DestBB << " V: " << V << "\n";
   DestList.push_back(DestBB);
 
   while (EatIfPresent(lltok::comma)) {
-    errs() << "Read comma" << "\n";
     if (ParseTypeAndBasicBlock(DestBB, PFS))
       return true;
     DestList.push_back(DestBB);
@@ -5267,19 +5265,13 @@ bool LLParser::ParseFork(Instruction *&Inst, PerFunctionState &PFS) {
   if (ParseToken(lltok::rsquare, "expected ']' at end of block list"))
     return true;
 
-  errs() << "Fork to be " << Values.size() << " : " << DestList.size() << "\n";
   ForkInst *FI = ForkInst::Create(cast<ConstantInt>(ID), ForceParallel,
                                   Interior, DestList.size() + Values.size());
-  errs() << "Fork created\n";
   for (unsigned i = 0, e = Values.size(); i != e; ++i)
     FI->addValue(Values[i]);
-  errs() << "values added \n";
   for (unsigned i = 0, e = DestList.size(); i != e; ++i) {
-    errs() << "D: " << DestList[i] << "\n";
-    errs() << "D: " << *DestList[i] << "\n";
     FI->addTask(DestList[i]);
   }
-  errs() << "dest added \n";
   Inst = FI;
   return false;
 }
