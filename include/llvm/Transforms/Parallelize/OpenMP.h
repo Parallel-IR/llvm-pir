@@ -1,4 +1,4 @@
-//===- PIR/Backend/OpenMP.h --- PIR backend for OpenMP --------*- C++ -*---===//
+//===- Transforms/Parallelize/OpenMP.h --- PIR OpenMP backend -*- C++ -*---===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -10,35 +10,29 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_PIR_BACKENDS_OPENMP_H
-#define LLVM_PIR_BACKENDS_OPENMP_H
+#ifndef LLVM_OPENMP_RUNTIME_BACKEND_H
+#define LLVM_OPENMP_RUNTIME_BACKEND_H
 
-#include "llvm/Pass.h"
-#include "llvm/IR/Instruction.h"
+// TODO: Create preprocessor guards that will disable this code if no OpenMP
+//       runtime (e.g., libgomp) is available on the target.
+
+#include "llvm/Transforms/Parallelize/PIRBackend.h"
 
 namespace llvm {
 
-
-class OpenMPParallelTasks : public FunctionPass {
-public:
-  static char ID;
-  explicit OpenMPParallelTasks();
-
-  ~OpenMPParallelTasks() override;
-
-  /// @name FunctionPass interface
-  //@{
-  bool runOnFunction(Function&) override;
-  void releaseMemory() override;
-  void getAnalysisUsage(AnalysisUsage&) const override;
-  void print(raw_ostream &, const Module *) const override;
-  void dump() const;
-  //@}
-
-private:
+class OpenMPRuntimeBackend : public PIRBackend {
   Instruction *CreateHeader(BasicBlock *);
   Instruction *CreateNextRegion(BasicBlock *);
   BasicBlock *CreateTasks(BasicBlock *);
+
+public:
+  virtual bool runOnParallelRegion(ParallelRegion &PR, ForkInst &FI,
+                                   DominatorTree &DT, LoopInfo &LI) override;
+
+  virtual int getScore(ParallelRegion *PR = nullptr,
+                       ForkInst *FI = nullptr) const override;
+
+  virtual const StringRef getName() const override { return "OpenMP"; }
 };
 
 }

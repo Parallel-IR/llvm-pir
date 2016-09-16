@@ -1,4 +1,4 @@
-//===- PIR/Backends/Sequentialize.cpp --- Sequentializing PIR backend -----===//
+//===------------------- Sequentializing PIR backend ----------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -11,20 +11,36 @@
 
 #include "llvm/Transforms/Parallelize/Sequentialize.h"
 
-#include "llvm/Transforms/Utils/ParallelUtils.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/Cloning.h"
-#include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ParallelRegionInfo.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/CodeExtractor.h"
+#include "llvm/Transforms/Utils/ParallelUtils.h"
 
 #include <deque>
 
 using namespace llvm;
 
-#define DEBUG_TYPE "pir-backend"
+#define DEBUG_TYPE "flatten-pir"
+
+int SequentializingBackend::getScore(ParallelRegion *PR, ForkInst *FI) const {
+  int Score = 10;
+
+  if (FI)
+    return FI->canBeSequentialized() ? Score : -1;
+
+  if (!PR)
+    return Score;
+
+  // TODO: Check all fork inst in PR
+
+  return Score;
+}
 
 static void removeFalsePredecessor(BasicBlock *removeFrom, BasicBlock *remove) {
   for (BasicBlock::iterator I = removeFrom->begin(); isa<PHINode>(I);) {
@@ -36,18 +52,186 @@ static void removeFalsePredecessor(BasicBlock *removeFrom, BasicBlock *remove) {
   }
 }
 
-SequentializeParallelRegions::SequentializeParallelRegions() :
-  FunctionPass(ID) {
-  initializeSequentializeParallelRegionsPass(*PassRegistry::getPassRegistry());
+static std::pair<BasicBlock *, BasicBlock *>
+createTaskLoop(ParallelTask *Task, unsigned NumExecutions,
+               SmallVector<BasicBlock *, 8> &EndBlocks, DominatorTree &DT,
+               LoopInfo &LI) {
+  Task->dump();
+  auto *TaskBB = *Task->begin();
+  auto &Ctx = TaskBB->getContext();
+  auto *HeaderBB = BasicBlock::Create(Ctx, "task_header", TaskBB->getParent(), TaskBB);
+  auto *ExitBB = BasicBlock::Create(Ctx, "task_exit", TaskBB->getParent(), TaskBB);
+  BranchInst::Create(ExitBB, ExitBB);
+
+  const auto &TaskEndBlocks = Task->getEndBlocks();
+
+  auto *IntTy = Type::getInt32Ty(Ctx);
+  auto *PHI = PHINode::Create(IntTy, EndBlocks.size() + TaskEndBlocks.size(), "",
+                              HeaderBB);
+
+  HeaderBB->getParent()->dump();
+  errs() << HeaderBB->getName() << "\n";
+  errs() << ExitBB->getName() << "\n";
+  for (auto *EndBlock : EndBlocks) {
+    errs() << "endBB: " << EndBlock->getName() << "\n";
+    PHI->addIncoming(ConstantInt::getNullValue(IntTy), EndBlock);
+  }
+
+  auto *Inc = BinaryOperator::CreateAdd(PHI, ConstantInt::get(IntTy, 1));
+  Inc->insertAfter(PHI);
+
+  for (auto *TaskEndBlock : TaskEndBlocks) {
+  errs() << "TaskendBB: " << TaskEndBlock->getName() << "\n";
+    PHI->addIncoming(Inc, TaskEndBlock);
+    EndBlocks.push_back(TaskEndBlock);
+  }
+
+
+  auto *Cmp =
+      ICmpInst::Create(Instruction::ICmp, ICmpInst::ICMP_NE, PHI,
+                       ConstantInt::get(IntTy, NumExecutions), "", HeaderBB);
+  BranchInst::Create(TaskBB, ExitBB, Cmp, HeaderBB);
+
+  HeaderBB->getParent()->dump();
+
+  return std::make_pair(HeaderBB, ExitBB);
 }
 
-SequentializeParallelRegions::~SequentializeParallelRegions() {}
+bool SequentializingBackend::runOnParallelRegion(ParallelRegion &PR,
+                                                 ForkInst &FI,
+                                                 DominatorTree &DT,
+                                                 LoopInfo &LI) {
+  if (PR.empty())
+    return false;
+
+  bool IsInterior = FI.isInterior();
+  SmallVector<ParallelTask *, 8> Tasks;
+  for (auto *Task : PR.tasks()) {
+    if (Task->getFork() != &FI)
+      continue;
+
+    Tasks.push_back(Task);
+  }
+  assert(!Tasks.empty());
+  assert(Tasks.size() == FI.getNumSuccessors());
+
+  auto *M = FI.getModule();
+  M->dump();
+
+  errs() << "\n\nFI:" << FI << "\n";
+  errs() << "#Tasks: " << Tasks.size() << "\n";
+  SmallVector<ParallelTask *, 8> Tasks2(PR.tasks());
+  separateTasks(Tasks2, &DT, &LI);
+
+  assert(getScore(&PR, &FI) >= 0);
+  assert(PR.size() > 0);
+
+  DenseMap<BasicBlock *, unsigned> NumTasksPerBlock;
+  for (auto *Task : Tasks)
+    NumTasksPerBlock[*Task->begin()]++;
+
+  TerminatorInst *ContinuationTI = nullptr;
+  SmallVector<BasicBlock *, 8> EndBlocks;
+  EndBlocks.push_back(FI.getParent());
+
+  for (auto *Task : Tasks) {
+    auto *TaskEntryBB = *Task->begin();
+    errs() << TaskEntryBB->getName() << " ##: " << NumTasksPerBlock.lookup(TaskEntryBB) << "\n";
+    if (NumTasksPerBlock.lookup(TaskEntryBB) == 0)
+      continue;
+
+    BasicBlock *ExitBB = nullptr;
+    unsigned &NumExecutions = NumTasksPerBlock[TaskEntryBB];
+    errs() << "#E: " << NumExecutions << "\n";
+    if (NumExecutions > 1) {
+      auto HeaderExitPair = createTaskLoop(Task, NumExecutions, EndBlocks, DT, LI);
+      TaskEntryBB = HeaderExitPair.first;
+      ExitBB = HeaderExitPair.second;
+      NumExecutions = 0;
+    }
+
+    for (auto *EndBlock : EndBlocks) {
+      errs() << "END BLOCK : "<< EndBlock->getName() << "\n";
+      EndBlock->dump();
+      auto *TI = EndBlock->getTerminator();
+      BranchInst::Create(TaskEntryBB, TI);
+
+      if (TI == &FI)
+        PR.eraseFork(&FI);
+      else if (!ContinuationTI && (isa<ReturnInst>(TI) || isa<JoinInst>(TI)))
+        ContinuationTI = TI;
+      else
+        TI->eraseFromParent();
+    }
+
+    EndBlocks.clear();
+    if (ExitBB) {
+      PR.addBlock(TaskEntryBB);
+      PR.addBlock(ExitBB);
+      for (auto *T : PR.getTasksMap().lookup(ExitBB))
+        T->setSingleExit(ExitBB);
+      EndBlocks.push_back(ExitBB);
+    }else
+      EndBlocks.append(Task->getEndBlocks().begin(), Task->getEndBlocks().end());
+  }
+
+  for (auto *EndBlock : EndBlocks) {
+    errs() << "END BLOCK : "<< EndBlock->getName() << "\n";
+    auto *TI = EndBlock->getTerminator();
+
+    if (TI == &FI)
+      PR.eraseFork(&FI);
+    else if (!ContinuationTI && (isa<ReturnInst>(TI) || isa<JoinInst>(TI)))
+      ContinuationTI = TI;
+    else
+      TI->eraseFromParent();
+  }
+
+  if (EndBlocks.empty())
+    return true;
+
+  errs() << "ContinuationTI: " << ContinuationTI << "\n";
+  if (ContinuationTI)
+    errs() << "ContinuationTI: " << *ContinuationTI << "\n";
+  if (!ContinuationTI)
+    ContinuationTI =
+        new UnreachableInst(EndBlocks.front()->getContext(), EndBlocks.front());
+  else if (isa<JoinInst>(ContinuationTI)) {
+    if (!IsInterior) {
+      auto *NewContTI = BranchInst::Create(ContinuationTI->getSuccessor(0), ContinuationTI);
+      ContinuationTI->eraseFromParent();
+      ContinuationTI = NewContTI;
+    }
+  } else {
+    assert(isa<ReturnInst>(ContinuationTI));
+  }
+
+  ContinuationTI->getFunction()->dump();
+  errs() << "CTI: " << *ContinuationTI << "\n";
+
+  for (auto *EndBlock : EndBlocks) {
+    errs() << "END BLOCK : "<< EndBlock->getName() << "\n";
+    EndBlock->dump();
+    auto *NewTI = ContinuationTI->clone();
+    BranchInst *B = nullptr;
+    if (EndBlock->empty())
+      B = BranchInst::Create(EndBlock, EndBlock);
+    NewTI->insertAfter(&EndBlock->back());
+    if (B)
+      B->eraseFromParent();
+  }
+
+  ContinuationTI->eraseFromParent();
+
+  M->dump();
+  PR.dump();
+  return true;
+}
 
 static inline unsigned minDepth(BasicBlock *BB,
-                                DenseMap<BasicBlock*, unsigned> &Block2Depth) {
+                                DenseMap<BasicBlock *, unsigned> &Block2Depth) {
   unsigned minDepth = UINT_MAX;
-  for (pred_iterator PI = pred_begin(BB), E = pred_end(BB);
-       PI != E; ++PI) {
+  for (pred_iterator PI = pred_begin(BB), E = pred_end(BB); PI != E; ++PI) {
     if (Block2Depth.count(*PI) && Block2Depth[*PI] < minDepth) {
       minDepth = Block2Depth[*PI];
     }
@@ -62,9 +246,9 @@ static inline unsigned minDepth(BasicBlock *BB,
 
 static inline void remapInstruction(Instruction *I,
                                     DenseSet<BasicBlock *> &PrevBlocks,
-                                    DenseSet<BasicBlock*> &NewBlocks,
+                                    DenseSet<BasicBlock *> &NewBlocks,
                                     ValueToValueMapTy &VMap,
-                                    DenseMap<BasicBlock*, unsigned> &Blck2D){
+                                    DenseMap<BasicBlock *, unsigned> &Blck2D) {
   PHINode *PN = dyn_cast<PHINode>(I);
   if (PN) {
     for (unsigned idx = 0; idx < PN->getNumIncomingValues(); ++idx) {
@@ -87,9 +271,8 @@ static inline void remapInstruction(Instruction *I,
       ValueToValueMapTy::iterator ValIt = VMap.find(PN->getIncomingValue(idx));
       if (ValIt != VMap.end()) {
         Instruction *Val = dyn_cast<Instruction>(ValIt->second);
-        if (!Val ||
-            (!Blck2D.count(Val->getParent()) || (
-             Blck2D[Incoming] >= Blck2D[Val->getParent()]))) {
+        if (!Val || (!Blck2D.count(Val->getParent()) ||
+                     (Blck2D[Incoming] >= Blck2D[Val->getParent()]))) {
           PN->setIncomingValue(idx, ValIt->second);
         }
       }
@@ -156,8 +339,7 @@ BasicBlock *SequentializeRegion(BasicBlock *regionStart) {
         SequentializeRegion(successor);
       }
       ValueToValueMapTy *vmap = new ValueToValueMapTy();
-      BasicBlock *newEntry = CloneBasicBlock(successor, *vmap,
-                                            "forkChild");
+      BasicBlock *newEntry = CloneBasicBlock(successor, *vmap, "forkChild");
       regionStart->getParent()->getBasicBlockList().push_back(newEntry);
       EntryBlocks.push_back(newEntry);
       OrigEntrys.push_back(successor);
@@ -220,7 +402,8 @@ BasicBlock *SequentializeRegion(BasicBlock *regionStart) {
         BasicBlock *successor = Term->getSuccessor(idx);
         TerminatorInst *succTerm = successor->getTerminator();
 
-        if (successor == regionStart || (isa<JoinInst>(succTerm) &&
+        if (successor == regionStart ||
+            (isa<JoinInst>(succTerm) &&
              isa<UnreachableInst>(exit->getTerminator()))) {
           // For fork interior, delay the join so the next call up on the
           // stack can deal with it correctly.
@@ -316,7 +499,17 @@ BasicBlock *SequentializeRegion(BasicBlock *regionStart) {
 // currently such a check.
 // Adding a dependency on the ParallelRegionInfoPass and reporting an error
 // if it finds an issue could also avoid this assumption
-bool SequentializeParallelRegions::runOnFunction(Function &F) {
+#if 0
+  bool modified = false;
+
+  auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+  auto &PRI = getAnalysis<ParallelRegionInfoPass>().getParallelRegionInfo();
+  for (auto *PR : PRI)
+    modified |= runOnParallelRegion(*PR, DT);
+
+  F.getParent()->dump();
+  return modified;
+
   bool modified = false;
 
   std::deque<BasicBlock *> OpenBlocks;
@@ -361,30 +554,4 @@ bool SequentializeParallelRegions::runOnFunction(Function &F) {
   }
 
   return modified;
-}
-
-void SequentializeParallelRegions::releaseMemory() {
-}
-
-void SequentializeParallelRegions::print(raw_ostream &, const Module *) const {
-}
-
-void SequentializeParallelRegions::getAnalysisUsage(AnalysisUsage &AU)
-  const {}
-
-char SequentializeParallelRegions::ID = 0;
-
-#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
-void SequentializeParallelRegions::dump() const {}
 #endif
-
-INITIALIZE_PASS_BEGIN(SequentializeParallelRegions, "sequentialize-regions",
-                      "Remove all fork and join instructions", true, false)
-INITIALIZE_PASS_END(SequentializeParallelRegions, "sequentialize-regions",
-                    "Remove all fork and join instructions", true, false)
-
-namespace llvm {
-FunctionPass *createSequentializeParallelRegionsPass() {
-  return new SequentializeParallelRegions();
-}
-}

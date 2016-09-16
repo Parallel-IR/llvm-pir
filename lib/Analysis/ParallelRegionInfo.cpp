@@ -11,11 +11,15 @@
 
 #include "llvm/Analysis/ParallelRegionInfo.h"
 
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ParallelUtils.h"
 
 #include <deque>
 
@@ -26,18 +30,248 @@ using namespace llvm;
 STATISTIC(NumParallelRegions, "The # of parallel regions");
 
 //===----------------------------------------------------------------------===//
+// ParallelTask implementation
+//
+ParallelTask::ParallelTask(ParallelRegion &Parent, ForkInst *FI, BasicBlock *EntryBB)
+    : Parent(Parent), FI(FI), EntryBB(EntryBB) {}
+
+void ParallelTask::setSingleExit(BasicBlock *BB) {
+  EndBlocks.clear();
+  EndBlocks.insert(BB);
+}
+
+void ParallelTask::addBlock(BasicBlock *BB) {
+  Blocks.insert(BB);
+  if (isTaskTerminator(BB->getTerminator()))
+    EndBlocks.insert(BB);
+}
+
+void ParallelTask::eraseBlock(BasicBlock *BB) {
+  Blocks.remove(BB);
+  if (isTaskTerminator(BB->getTerminator()))
+    EndBlocks.erase(BB);
+}
+
+bool ParallelTask::isEndBlock(BasicBlock *BB) const {
+  return EndBlocks.count(BB);
+}
+
+void ParallelTask::print(raw_ostream &OS) const {
+  OS << "PT[#B " << Blocks.size() << "][" << *FI << " ]\n";
+  for (auto *BB : Blocks)
+    OS.indent(8) << "- " << BB->getName()
+                 << (isa<ForkInst>(BB->getTerminator())  ? " [fork]" : "")
+                 << (BB == EntryBB  ? " [start]" : "")
+                 << (isEndBlock(BB) ? " [end]\n" : "\n");
+}
+
+//===----------------------------------------------------------------------===//
 // ParallelRegion implementation
 //
 
-ParallelRegion::ParallelRegion(ParallelRegionInfo *RI, DominatorTree *DT,
-                               ConstantInt *Id, ForkInst *fork,
-                               ParallelRegion *parent)
-    : Fork(fork), Parent(parent), ParallelRegionID(Id) {}
+ParallelRegion::ParallelRegion(ParallelRegionInfo &PRI, ForkInst *FI,
+                               ParallelRegion *Parent)
+    : PRI(PRI), Parent(Parent) {
+  NumParallelRegions++;
 
-ParallelRegion::~ParallelRegion() {
-  /* NOTE: This assumes subegions are only subegions of depth 1 less
-     To fix this, check depth first. */
-  DeleteContainerPointers(SubRegions);
+  addTasks(FI);
+  if (Parent)
+    Parent->addSubRegion(this);
+}
+
+ParallelRegion::ParallelRegion(ParallelRegion &&Other)
+    : PRI(Other.PRI), Forks(std::move(Other.Forks)),
+      Parent(Other.Parent), TasksMap(std::move(Other.TasksMap)),
+      SubRegions(std::move(Other.SubRegions)) {
+  if (Parent)
+    Parent->addSubRegion(this);
+}
+
+ParallelRegion::~ParallelRegion() {}
+
+void ParallelRegion::addSubRegion(ParallelRegion *SubPR) {
+  SubRegions.push_back(SubPR);
+}
+
+void ParallelRegion::removeSubRegion(ParallelRegion *SubPR) {
+  SubRegions.erase(&SubPR);
+}
+
+void ParallelRegion::addTasks(ForkInst *FI) {
+  assert(FI->isInterior() || !TasksMap.count(FI->getParent()));
+  Forks.push_back(FI);
+  bool Skip = false; //FI->isInterior();
+  for (auto *TaskStartBB : FI->successors()) {
+    if (Skip) {
+      auto &SuccTasks = TasksMap[TaskStartBB];
+      assert(TasksMap.count(FI->getParent()));
+      const auto &FITasks = TasksMap.lookup(FI->getParent());
+      SuccTasks.insert(FITasks.begin(), FITasks.end());
+      Skip = false;
+    } else {
+      auto *Task = new ParallelTask(*this, FI, TaskStartBB);
+      TasksMap[TaskStartBB].insert(Task);
+      Tasks.insert(Task);
+    }
+  }
+}
+
+void ParallelRegion::eraseForkSuccessor(ForkInst *FI, BasicBlock *SuccBB) {
+  for (auto It = begin(), End = end(); It != End;) {
+    if ((*It)->getFork() == FI && (*It)->isStartBlock(SuccBB))
+      It = Tasks.erase(It);
+    else
+      It++;
+  }
+}
+
+void ParallelRegion::eraseFork(ForkInst *FI) {
+  for (auto It = Tasks.begin(); It != Tasks.end();) {
+    if ((*It)->getFork() != FI) {
+      It++;
+      continue;
+    }
+
+    for (auto *BB : (*It)->blocks())
+      TasksMap[BB].remove(*It);
+
+    It = Tasks.erase(It);
+  }
+
+  for (auto It = fork_begin(), End = fork_end(); It != End; It++)
+    if (*It == FI) {
+      Forks.erase(It);
+      break;
+    }
+
+  FI->eraseFromParent();
+}
+
+void ParallelRegion::addBlock(BasicBlock *BB) {
+  auto &BBTasks = TasksMap[BB];
+    errs() << "AB " << BB->getName() << "\n";
+  for (auto *PredBB : predecessors(BB)) {
+    errs() << "-- " << PredBB->getName() << "\n";
+    if (isa<ForkInst>(PredBB->getTerminator()))
+      continue;
+    const auto &PredBBTasks = TasksMap.lookup(PredBB);
+    BBTasks.insert(PredBBTasks.begin(), PredBBTasks.end());
+  }
+
+  for (auto *Task : BBTasks)
+    Task->addBlock(BB);
+}
+
+void ParallelRegion::addBlocks(SetVector<BasicBlock *> &Blocks) const {
+  for (auto *Task : Tasks)
+    Blocks.insert(Task->begin(), Task->end());
+  for (auto *SR : SubRegions)
+    SR->addBlocks(Blocks);
+}
+
+BasicBlock *ParallelRegion::splitBlockPredecessors(BasicBlock *BB,
+                                     ArrayRef<BasicBlock *> PredBBs,
+                                     DominatorTree *DT,
+                                     LoopInfo *LI) {
+
+  dump();
+  errs() << "Split: " << *BB << "\n";
+  for (auto *PBB : PredBBs)
+    errs() << "\t- " << PBB->getName() << "\n";
+  assert(TasksMap.count(BB));
+  auto *NewBB = SplitBlockPredecessors(BB, PredBBs, "", DT, LI);
+  auto *NewBBTI = NewBB->getTerminator();
+  assert(isa<BranchInst>(NewBBTI) && NewBBTI->getNumSuccessors() == 1 &&
+          NewBBTI->getSuccessor(0) == BB);
+
+  errs() << "NEwBB: " << *NewBB << "\n";
+  errs() << "BB: " << *BB << "\n";
+
+  ValueToValueMapTy VMap;
+  auto *CloneBB = CloneBasicBlock(BB, VMap, "", BB->getParent());
+
+  for (auto &I : *BB) {
+    auto *PHI = dyn_cast<PHINode>(&I);
+    if (!PHI)
+      break;
+    assert(PHI->getBasicBlockIndex(NewBB) >= 0);
+    VMap[PHI] = PHI->getIncomingValueForBlock(NewBB);
+  }
+
+  SmallVector<BasicBlock *, 1> Blocks({CloneBB});
+  remapInstructionsInBlocks(Blocks, VMap);
+
+  while (auto *PHI = dyn_cast<PHINode>(CloneBB->begin()))
+    PHI->eraseFromParent();
+
+  for (auto &I : *BB) {
+    auto *PHI = dyn_cast<PHINode>(&I);
+    if (!PHI)
+      break;
+    PHI->removeIncomingValue(NewBB, true);
+  }
+
+  if (DT)
+    DT->addNewBlock(CloneBB, NewBB);
+  if (LI)
+    LI->changeLoopFor(CloneBB, LI->getLoopFor(BB));
+  NewBBTI->setSuccessor(0, CloneBB);
+
+  bool Success = MergeBlockIntoPredecessor(CloneBB, DT, LI);
+  assert(Success);
+
+  errs() << "NewBB: " << NewBB->getName() << "\n";
+  auto &NewBBTasks = TasksMap[NewBB];
+  for (auto *PredBB : PredBBs) {
+    errs() << "\tPredBB: " << PredBB->getName() << "\n";
+    for (auto *Task : TasksMap.lookup(PredBB)) {
+      Task->dump();
+      Task->addBlock(NewBB);
+      Task->eraseBlock(BB);
+      NewBBTasks.insert(Task);
+      Task->dump();
+    }
+
+    if (auto *FI = dyn_cast<ForkInst>(PredBB->getTerminator())) {
+      for (auto *Task : TasksMap.lookup(BB)) {
+        if (Task->getFork() != FI)
+          continue;
+        Task->dump();
+        Task->addBlock(NewBB);
+        Task->eraseBlock(BB);
+        NewBBTasks.insert(Task);
+        Task->dump();
+      }
+    }
+  }
+
+  errs() << "BB: " << BB->getName() << "\n";
+  auto &BBTasks = TasksMap[BB];
+  errs() << "BBTasls:\n";
+  for (auto *T : BBTasks)
+    T->dump();
+  BBTasks.clear();
+  for (auto *PredBB : predecessors(BB)) {
+    errs() << "\tPredBB: " << PredBB->getName() << "\n";
+    for (auto *Task : TasksMap.lookup(PredBB)) {
+      Task->dump();
+      Task->addBlock(BB);
+      BBTasks.insert(Task);
+      Task->dump();
+    }
+  }
+
+  return NewBB;
+}
+
+void ParallelRegion::print(raw_ostream &OS) const {
+  OS << getName() << "[#SR " << getNumSubRegions() << "]\n";
+
+  for (const auto *Task : *this)
+    Task->print(OS.indent(8));
+
+  for (const auto *SR : SubRegions)
+    SR->print(OS.indent(8));
 }
 
 //===----------------------------------------------------------------------===//
@@ -48,114 +282,98 @@ ParallelRegionInfo::ParallelRegionInfo() : NextParallelRegionId(0) {}
 
 ParallelRegionInfo::~ParallelRegionInfo() {}
 
-void ParallelRegionInfo::print(raw_ostream &OS) const { OS << "PIR\n"; }
+void ParallelRegionInfo::print(raw_ostream &OS) const {
+  OS << "Top level parallel regions: " << TopLevelRegions.size() << "\n";
+  for (auto *TLR : TopLevelRegions)
+    TLR->print(OS.indent(4));
+}
+
+void ParallelRegionInfo::eraseParallelRegion(ParallelRegion &PR) {
+  auto *ParentPR = PR.getParentRegion();
+
+  SetVector<BasicBlock *> Blocks;
+  PR.addBlocks(Blocks);
+  for (auto *BB : Blocks) {
+    if (ParentPR)
+      BB2PRMap[BB] = ParentPR;
+    else
+      BB2PRMap.erase(BB);
+  }
+
+  if (ParentPR)
+    ParentPR->removeSubRegion(&PR);
+  else {
+    for (unsigned u = 0, e = TopLevelRegions.size(); u < e; u++)
+      if (TopLevelRegions[u] == &PR) {
+        TopLevelRegions.erase(&TopLevelRegions[u]);
+        break;
+      }
+  }
+
+  for (auto *SubPR : PR.sub_regions()) {
+    SubPR->setParent(ParentPR);
+    if (ParentPR)
+      ParentPR->addSubRegion(SubPR);
+    else
+      TopLevelRegions.push_back(SubPR);
+  }
+
+  delete &PR;
+}
 
 void ParallelRegionInfo::dump() const { return print(errs()); }
 
 void ParallelRegionInfo::releaseMemory() {
   DeleteContainerPointers(TopLevelRegions);
+  TopLevelRegions.clear();
 }
 
 void ParallelRegionInfo::recalculate(Function &F, DominatorTree *DT) {
   std::deque<BasicBlock *> OpenBlocks;
-  DenseSet<BasicBlock *> SeenBlocks;
   BB2PRMap.clear();
-  Fork2PRMap.clear();
 
-  BasicBlock *EntryBB = &F.getEntryBlock();
-  OpenBlocks.push_back(EntryBB);
-  BB2PRMap[EntryBB];
-  while (!OpenBlocks.empty()) {
-    BasicBlock *BB = OpenBlocks.front();
-    OpenBlocks.pop_front();
+  ReversePostOrderTraversal<Function *> RPOT(&F);
+  for (auto It = RPOT.begin(), End = RPOT.end(); It != End; ++It) {
+    auto *BB = *It;
+    auto *CurPR = BB2PRMap[BB];
 
-    if (!SeenBlocks.insert(BB).second)
-      continue;
+    if (CurPR)
+      CurPR->addBlock(BB);
 
-    ParallelRegion *curPR = BB2PRMap[BB];
-
-    if (curPR && (isa<ReturnInst>(BB->getTerminator()) ||
-                  isa<HaltInst>(BB->getTerminator()))) {
-      curPR->addExitBlockToRegion(BB);
-    }
-
-    ForkInst *FI = dyn_cast<ForkInst>(BB->getTerminator());
-    if (FI && !(FI->isInterior())) {
-      ParallelRegion *subRegion =
-          new ParallelRegion(this, DT, FI->getParallelRegionId(), FI, curPR);
-      if (!curPR) {
-        TopLevelRegions.push_back(subRegion);
+    auto *FI = dyn_cast<ForkInst>(BB->getTerminator());
+    if (FI) {
+      if (FI->isInterior()) {
+        CurPR->addTasks(FI);
       } else {
-        curPR->addSubRegion(subRegion);
+        auto *SubPR = new ParallelRegion(*this, FI, CurPR);
+        if (CurPR)
+          CurPR->addSubRegion(SubPR);
+        else
+          TopLevelRegions.push_back(SubPR);
+        CurPR = SubPR;
       }
-      curPR = subRegion;
-      Fork2PRMap[FI] = subRegion;
     }
 
-    for (BasicBlock *SuccBB : successors(BB)) {
-      if (isa<JoinInst>(SuccBB->front())) {
-        assert(curPR && "Join instruction outside of a parallel region.");
-        assert(!BB2PRMap.count(SuccBB) || (BB2PRMap[SuccBB] == curPR->Parent &&
-                                           "Inconsistent CFG, paths to the "
-                                           "same join with different depths."));
-        curPR->addExitBlockToRegion(BB);
-        BB2PRMap[SuccBB] = curPR->Parent;
-      } else {
-        BB2PRMap[SuccBB] = curPR;
-      }
+    ParallelRegion *SuccPR = CurPR;
+    if (isa<JoinInst>(BB->getTerminator())) {
+      assert(CurPR && "Join instruction outside of a parallel region.");
+      SuccPR = CurPR->Parent;
+    }
 
-      if (FI) {
-        curPR->addEntryBlockToRegion(SuccBB);
-      }
-      OpenBlocks.push_back(SuccBB);
+    for (auto *SuccBB : successors(BB)) {
+      auto *&CurSuccPR = BB2PRMap[SuccBB];
+      assert((!CurSuccPR || CurSuccPR == SuccPR) &&
+             "Inconsistent path! Different parallel regions for one block!");
+      CurSuccPR = SuccPR;
     }
   }
-
-  for (auto &It : BB2PRMap) {
-    ParallelRegion *region = It.second;
-    while (region != nullptr) {
-      region->Blocks.push_back(It.first);
-      region = region->Parent;
-    }
-  }
-
-  std::deque<ParallelRegion *> PrintRegions;
-  for (ParallelRegion *region : TopLevelRegions)
-    PrintRegions.push_back(region);
-
-  while (!PrintRegions.empty()) {
-    ParallelRegion *region = PrintRegions.front();
-    PrintRegions.pop_front();
-
-    errs() << "PR: ";
-    if (region->ParallelRegionID) {
-      errs() << (region->ParallelRegionID);
-    }
-    errs() << "\n";
-
-    for (const auto &BB : region->Blocks) {
-      errs().indent(4) << BB->getName() << "\n";
-    }
-
-    for (const auto &It : region->getSubRegions()) {
-      errs() << (It->ParallelRegionID) << "\t";
-      PrintRegions.push_back(It);
-    }
-    errs() << "\n";
-  }
-}
-
-ParallelRegion *ParallelRegionInfo::getForkedRegion(Instruction *I) {
-  return Fork2PRMap[I];
 }
 
 //===----------------------------------------------------------------------===//
 // ParallelRegionInfoPass implementation
 //
 
-ParallelRegionInfoPass::ParallelRegionInfoPass() : FunctionPass(ID) {
-  initializeParallelRegionInfoPassPass(*PassRegistry::getPassRegistry());
-}
+ParallelRegionInfoPass::ParallelRegionInfoPass() : FunctionPass(ID) {}
 
 ParallelRegionInfoPass::~ParallelRegionInfoPass() {}
 
@@ -171,8 +389,10 @@ bool ParallelRegionInfoPass::runOnFunction(Function &F) {
 void ParallelRegionInfoPass::releaseMemory() { RI.releaseMemory(); }
 
 void ParallelRegionInfoPass::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.addRequired<LoopInfoWrapperPass>();
+  AU.addRequired<DominatorTreeWrapperPass>();
+
   AU.setPreservesAll();
-  AU.addRequiredTransitive<DominatorTreeWrapperPass>();
 }
 
 void ParallelRegionInfoPass::print(raw_ostream &OS, const Module *) const {
@@ -186,10 +406,11 @@ void ParallelRegionInfoPass::dump() const { RI.dump(); }
 char ParallelRegionInfoPass::ID = 0;
 
 INITIALIZE_PASS_BEGIN(ParallelRegionInfoPass, "parallel-regions",
-                      "Detect parallel regions", true, true)
+                      "Detect parallel regions", false, true)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
 INITIALIZE_PASS_END(ParallelRegionInfoPass, "parallel-regions",
-                    "Detect parallel regions", true, true)
+                    "Detect parallel regions", false, true)
 
 // Create methods available outside of this file, to use them
 // "include/llvm/LinkAllPasses.h". Otherwise the pass would be deleted by

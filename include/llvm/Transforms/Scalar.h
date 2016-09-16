@@ -511,6 +511,18 @@ FunctionPass *createLoopDataPrefetchPass();
 ///===---------------------------------------------------------------------===//
 ModulePass *createNameAnonFunctionPass();
 
+//===----------------------------------------------------------------------===//
+//
+// Identify all parallel regions and build the parallel region tree.
+//
+FunctionPass *createParallelRegionInfoPass();
+
+//===----------------------------------------------------------------------===//
+//
+// Create a sequential program by flattening parallel regions.
+//
+FunctionPass *createFlattenPIRPass();
+
 } // End llvm namespace
 
 #endif

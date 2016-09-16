@@ -26,8 +26,6 @@ void llvm::initializeTransformUtils(PassRegistry &Registry) {
   initializeInstNamerPass(Registry);
   initializeLCSSAWrapperPassPass(Registry);
   initializeLoopSimplifyPass(Registry);
-  initializeSequentializeParallelRegionsPass(Registry);
-  initializeOpenMPParallelTasksPass(Registry);
   initializeLowerInvokePass(Registry);
   initializeLowerSwitchPass(Registry);
   initializeNameAnonFunctionPass(Registry);
@@ -37,7 +35,7 @@ void llvm::initializeTransformUtils(PassRegistry &Registry) {
   initializeMetaRenamerPass(Registry);
   initializeMemorySSAWrapperPassPass(Registry);
   initializeMemorySSAPrinterLegacyPassPass(Registry);
-  initializeParallelization(Registry);
+  initializeFlattenPIRPassPass(Registry);
 }
 
 /// LLVMInitializeTransformUtils - C binding for initializeTransformUtilsPasses.

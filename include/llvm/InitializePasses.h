@@ -34,9 +34,6 @@ void initializeObjCARCOpts(PassRegistry&);
 /// Initialize all passes linked into the Vectorize library.
 void initializeVectorization(PassRegistry&);
 
-/// Initialize all passes linked into the Parallelize library.
-void initializeParallelization(PassRegistry&);
-
 /// Initialize all passes linked into the InstCombine library.
 void initializeInstCombine(PassRegistry&);
 
@@ -245,9 +242,8 @@ void initializeObjCARCContractPass(PassRegistry&);
 void initializeObjCARCExpandPass(PassRegistry&);
 void initializeObjCARCOptPass(PassRegistry&);
 void initializeOptimizePHIsPass(PassRegistry&);
+void initializeFlattenPIRPassPass(PassRegistry&);
 void initializeParallelRegionInfoPassPass(PassRegistry&);
-void initializeSequentializeParallelRegionsPass(PassRegistry&);
-void initializeOpenMPParallelTasksPass(PassRegistry&);
 void initializePAEvalPass(PassRegistry &);
 void initializePEIPass(PassRegistry&);
 void initializePGOIndirectCallPromotionLegacyPassPass(PassRegistry&);

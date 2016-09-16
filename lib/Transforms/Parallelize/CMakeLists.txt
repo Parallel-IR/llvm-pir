@@ -1,4 +1,5 @@
 add_llvm_library(LLVMParallelize
+  FlattenPIR.cpp
   Sequentialize.cpp
   OpenMP.cpp
 

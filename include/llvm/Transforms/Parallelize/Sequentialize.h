@@ -9,29 +9,23 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_PIR_BACKENDS_SEQUENTIALIZING_H
-#define LLVM_PIR_BACKENDS_SEQUENTIALIZING_H
+#ifndef LLVM_SEQUENTIALIZING_BACKEND_H
+#define LLVM_SEQUENTIALIZING_BACKEND_H
 
-#include "llvm/Pass.h"
-#include "llvm/IR/Instruction.h"
+#include "llvm/Transforms/Parallelize/PIRBackend.h"
 
 namespace llvm {
 
-class SequentializeParallelRegions : public FunctionPass {
+class SequentializingBackend : public PIRBackend {
+
 public:
-  static char ID;
-  explicit SequentializeParallelRegions();
+  virtual bool runOnParallelRegion(ParallelRegion &PR, ForkInst &FI,
+                                   DominatorTree &DT, LoopInfo &LI) override;
 
-  ~SequentializeParallelRegions() override;
+  virtual int getScore(ParallelRegion *PR = nullptr,
+                       ForkInst *FI = nullptr) const override;
 
-  /// @name FunctionPass interface
-  //@{
-  bool runOnFunction(Function&) override;
-  void releaseMemory() override;
-  void getAnalysisUsage(AnalysisUsage&) const override;
-  void print(raw_ostream &, const Module *) const override;
-  void dump() const;
-  //@}
+  virtual const StringRef getName() const override { return "Sequentialization"; }
 };
 
 }
