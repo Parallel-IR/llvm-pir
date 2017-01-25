@@ -496,6 +496,18 @@ ParallelRegionInfo::createMapping() const {
   return BB2PTMap;
 }
 
+void ParallelRegionInfo::getAllParallelRegions(
+    ParallelRegionVectorTy &Container) const {
+
+  Container.append(begin(), end());
+  for (unsigned i = 0; i < Container.size(); i++) {
+    ParallelRegion *PR = Container[i];
+
+    for (const auto &It : PR->getSubRegions())
+      Container.push_back(It.getSecond());
+  }
+}
+
 ParallelRegion *ParallelRegionInfo::getParallelLoopRegion(const Loop &L,
                                         const DominatorTree &DT) const {
   if (empty())

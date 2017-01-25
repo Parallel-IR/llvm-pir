@@ -58,6 +58,9 @@ void initializeGlobalISel(PassRegistry &Registry);
 /// Initialize all passes linked into the CodeGen library.
 void initializeTarget(PassRegistry&);
 
+/// Initialize all passes linked into the PIR library.
+void initializePIROpts(PassRegistry&);
+
 void initializeAAEvalLegacyPassPass(PassRegistry&);
 void initializeAAResultsWrapperPassPass(PassRegistry &);
 void initializeADCELegacyPassPass(PassRegistry&);
@@ -319,6 +322,7 @@ void initializeScalarEvolutionWrapperPassPass(PassRegistry&);
 void initializeScalarizerPass(PassRegistry&);
 void initializeScopedNoAliasAAWrapperPassPass(PassRegistry&);
 void initializeSeparateConstOffsetFromGEPPass(PassRegistry &);
+void initializeSequentializePIRPass(PassRegistry&);
 void initializeShadowStackGCLoweringPass(PassRegistry&);
 void initializeShrinkWrapPass(PassRegistry &);
 void initializeSimpleInlinerPass(PassRegistry&);

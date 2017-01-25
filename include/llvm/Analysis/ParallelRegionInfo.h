@@ -110,6 +110,9 @@ public:
   const_iterator end() const { return TopLevelParallelRegions.end(); }
   ///}
 
+  /// Fill @p Container with all parallel regions (not only top level).
+  void getAllParallelRegions(ParallelRegionVectorTy &Container) const;
+
   /// Return the parallel region that makes @p L a parallel loop, if any.
   ///
   /// A parallel loop is a loop that does fork (parts of) its body to a new
