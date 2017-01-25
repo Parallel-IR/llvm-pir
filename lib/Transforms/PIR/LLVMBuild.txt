@@ -1,4 +1,4 @@
-;===- ./lib/Passes/LLVMBuild.txt -------------------------------*- Conf -*--===;
+;===- ./lib/Transforms/PIR/LLVMBuild.txt -----------------------*- Conf -*--===;
 ;
 ;                     The LLVM Compiler Infrastructure
 ;
@@ -17,6 +17,6 @@
 
 [component_0]
 type = Library
-name = Passes
-parent = Libraries
-required_libraries = Analysis CodeGen Core IPO InstCombine Scalar Support TransformUtils Vectorize Instrumentation PIR
+name = PIR
+parent = Transforms
+required_libraries = Analysis BitWriter Core InstCombine IRReader Linker Object ProfileData Scalar Support TransformUtils Vectorize Instrumentation
