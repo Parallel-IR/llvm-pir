@@ -272,6 +272,7 @@ For API clients and LLVM developers.
    FaultMaps
    MIRLangRef
    Coroutines
+   ParallelIR
    GlobalISel
    XRay
    PDB/index
@@ -392,6 +393,9 @@ For API clients and LLVM developers.
 
 :doc:`Coroutines`
   LLVM support for coroutines.
+
+:doc:`ParallelIR`
+  LLVM support for fork-join parallelism.
 
 :doc:`GlobalISel`
   This describes the prototype instruction selection replacement, GlobalISel.

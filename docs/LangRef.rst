@@ -8968,6 +8968,173 @@ Example:
 
       %tok = cleanuppad within %cs []
 
+.. _parallelinsts:
+
+Parallel Instructions:
+----------------------
+
+This section introduces three terminator instructions to express fork-join
+parallelism. These instructions mark the boundaries of `parallel regions
+<ParallelIR.html#parallel-regions>`_ in the CFG. For a definition of parallel
+regions, their semantics and other relevant
+information see `LLVM's Parallel IR <ParallelIR.html#introduction>`_
+documentation.
+
+.. _i_fork:
+
+'``fork``' Instruction
+^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+::
+
+      fork label <forked_bb>, <continuation_bb>
+
+Overview:
+"""""""""
+
+'``fork``' is a terminator instruction that marks the beginning of a parallel
+region. 
+
+Arguments:
+""""""""""
+
+A '``fork``' instruction has two '``label``' values corresponding to two
+different basic blocks that define the entry points of the parallel tasks.
+
+Semantics:
+""""""""""
+
+In a parallel context, executing a '``fork``' instruction corresponds to
+spawning two parallel tasks. The '``<forked_bb>``' label begins a forked
+sub-region (or task) that might be scheduled for execution by a different thread
+than the current thread. The '``<continuation_bb>``' label begins a sub-region
+that might be scheduled in parallel but is execution by the spawning thread.
+
+In a sequential context, executing a '``fork``' instruction is equivalent to an
+unconditional branch to the sub-region starting with the '``<forked_bb>``' basic
+block. Here, the '``<forked>``' sub-region will also unconditionally branch to
+the '``<continuation>``' sub-region through the :ref:`halt <i_halt>`
+terminator.
+
+Example:
+""""""""
+
+.. code-block:: text
+
+     parallel_begin:
+                fork label %forked_bb, %continuation_bb   ; Begin a parallel region
+     forked_bb:                                           ; Begin the forked branch of the region
+                ...
+     continuation_bb:                                     ; Begin the continuation branch of the region
+                ...
+
+.. _i_halt:
+
+'``halt``' Instruction
+^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+::
+
+      halt label <continuation_bb>
+
+Overview:
+"""""""""
+
+The '``halt``' instruction terminates a region that was previously '``forked``'
+by a :ref:`fork <i_fork>` instruction.
+
+Arguments:
+""""""""""
+
+The '``halt``' instruction takes one argument that corresponds to a continuation
+sub-region.
+
+A '``halt``' instruction is :ref:`well formed <wellformed>` only if its argument
+corresponds to its sibling continuation sub-region.
+
+Semantics:
+""""""""""
+
+In a parallel context, '``halt``' doesn't correspond to an actual control
+transfer from the terminated block to the argument block. This edge in the CFG
+serves to express asymmetric parallelism. As a result sequential semantics are
+expressed as a path in the parallel CFG.
+
+In a sequential context, '``halt``' represents an actual transfer of control
+from the terminated block to the target continuation block.
+
+Example:
+""""""""
+
+.. code-block:: text
+
+     parallel_begin:
+                fork label %forked_bb, %continuation_bb
+     forked_bb:
+                call void foo()
+                halt label %continuation_bb                ; Connect forked task with the sibling continuation
+     continuation_bb:
+                ...
+
+.. _i_join:
+
+'``join``' Instruction
+^^^^^^^^^^^^^^^^^^^^^^
+
+Syntax:
+"""""""
+
+::
+
+      join label <past_parallel_region_block>
+
+Overview:
+"""""""""
+
+'``join``' is a terminator instruction that marks the end of a parallel region.
+A '``join``' terminates the '``<continuation_bb>``' task started by the
+corresponding :ref:`fork <i_fork>` instruction.
+
+Arguments:
+""""""""""
+
+'``join``' takes one argument that corresponds to the basic block that is
+execute after the parallel region.
+
+A '``join``' is :ref:`well formed <wellformed>` only if it is the terminator
+of the continuation sub-region of the closest unmerged :ref:`fork <i_fork>`.
+
+Semantics:
+""""""""""
+
+A '``join``' marks a synchronization point and the end of a parallel region.
+Once a join terminator is reached, the thread waits for the forked task spawned
+by the corresponding parallel region to finish execution, thus to reach a
+'``halt``' terminator. Note that the continuation task also finished execution
+at this point as it is terminated by the '``join``'.
+
+Example:
+""""""""
+
+.. code-block:: text
+
+     parallel_begin:
+                fork label %forked_bb, %continuation_bb
+     forked_bb:
+                call void foo()
+                halt label %continuation_bb
+     continuation_bb:
+                call void bar()
+                join label %post_parallel_block
+     post_parallel_block:
+                ...
+
 .. _intrinsics:
 
 Intrinsic Functions
