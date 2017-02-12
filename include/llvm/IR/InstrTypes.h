@@ -93,6 +93,18 @@ public:
     return isa<Instruction>(V) && classof(cast<Instruction>(V));
   }
 
+  // \brief Returns true if this terminator relates to parallelism.
+  bool isForkJoinHalt() const {
+    switch (getOpcode()) {
+    case Instruction::Fork:
+    case Instruction::Halt:
+    case Instruction::Join:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   // \brief Returns true if this terminator relates to exception handling.
   bool isExceptional() const {
     switch (getOpcode()) {
