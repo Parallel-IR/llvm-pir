@@ -60,6 +60,7 @@ add_llvm_library(LLVMAnalysis
   ObjCARCInstKind.cpp
   OptimizationDiagnosticInfo.cpp
   OrderedBasicBlock.cpp
+  ParallelRegionInfo.cpp
   PHITransAddr.cpp
   PostDominators.cpp
   ProfileSummaryInfo.cpp
