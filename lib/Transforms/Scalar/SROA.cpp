@@ -30,6 +30,7 @@
 #include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/Loads.h"
+#include "llvm/Analysis/ParallelRegionInfo.h"
 #include "llvm/Analysis/PtrUseVisitor.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -3569,7 +3570,7 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          PartPtrTy, BasePtr->getName() + "."),
           getAdjustedAlignment(LI, PartOffset, DL), /*IsVolatile*/ false,
           LI->getName());
-      PLoad->copyMetadata(*LI, LLVMContext::MD_mem_parallel_loop_access); 
+      PLoad->copyMetadata(*LI, LLVMContext::MD_mem_parallel_loop_access);
 
       // Append this load onto the list of split loads so we can find it later
       // to rewrite the stores.
@@ -4082,6 +4083,13 @@ bool SROA::runOnAlloca(AllocaInst &AI) {
     AI.eraseFromParent();
     return true;
   }
+
+  // For now we do not perform SROA if it might break a parallel region.
+  // TODO Perform this check on the slices and promote the ones that are safe to
+  //      promote.
+  if (!PRI->isSafeToPromote(AI, *DT))
+    return false;
+
   const DataLayout &DL = AI.getModule()->getDataLayout();
 
   // Skip alloca forms that this analysis can't handle.
@@ -4191,11 +4199,13 @@ bool SROA::promoteAllocas(Function &F) {
 }
 
 PreservedAnalyses SROA::runImpl(Function &F, DominatorTree &RunDT,
-                                AssumptionCache &RunAC) {
+                                AssumptionCache &RunAC,
+                                ParallelRegionInfo &RunPRI) {
   DEBUG(dbgs() << "SROA function: " << F.getName() << "\n");
   C = &F.getContext();
   DT = &RunDT;
   AC = &RunAC;
+  PRI = &RunPRI;
 
   BasicBlock &EntryBB = F.getEntryBlock();
   for (BasicBlock::iterator I = EntryBB.begin(), E = std::prev(EntryBB.end());
@@ -4243,7 +4253,8 @@ PreservedAnalyses SROA::runImpl(Function &F, DominatorTree &RunDT,
 
 PreservedAnalyses SROA::run(Function &F, FunctionAnalysisManager &AM) {
   return runImpl(F, AM.getResult<DominatorTreeAnalysis>(F),
-                 AM.getResult<AssumptionAnalysis>(F));
+                 AM.getResult<AssumptionAnalysis>(F),
+                 AM.getResult<ParallelRegionAnalysis>(F));
 }
 
 /// A legacy pass for the legacy pass manager that wraps the \c SROA pass.
@@ -4264,12 +4275,14 @@ public:
 
     auto PA = Impl.runImpl(
         F, getAnalysis<DominatorTreeWrapperPass>().getDomTree(),
-        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F));
+        getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F),
+        getAnalysis<ParallelRegionInfoPass>().getParallelRegionInfo());
     return !PA.areAllPreserved();
   }
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<AssumptionCacheTracker>();
     AU.addRequired<DominatorTreeWrapperPass>();
+    AU.addRequired<ParallelRegionInfoPass>();
     AU.addPreserved<GlobalsAAWrapperPass>();
     AU.setPreservesCFG();
   }
@@ -4286,5 +4299,6 @@ INITIALIZE_PASS_BEGIN(SROALegacyPass, "sroa",
                       "Scalar Replacement Of Aggregates", false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(ParallelRegionInfoPass)
 INITIALIZE_PASS_END(SROALegacyPass, "sroa", "Scalar Replacement Of Aggregates",
                     false, false)

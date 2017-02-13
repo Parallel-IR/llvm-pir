@@ -26,6 +26,8 @@
 
 namespace llvm {
 
+class ParallelRegionInfo;
+
 /// A private "module" namespace for types and utilities used by SROA. These
 /// are implementation details and should not be used by clients.
 namespace sroa LLVM_LIBRARY_VISIBILITY {
@@ -59,6 +61,7 @@ class SROA : public PassInfoMixin<SROA> {
   LLVMContext *C = nullptr;
   DominatorTree *DT = nullptr;
   AssumptionCache *AC = nullptr;
+  ParallelRegionInfo *PRI = nullptr;
 
   /// \brief Worklist of alloca instructions to simplify.
   ///
@@ -114,7 +117,7 @@ private:
 
   /// Helper used by both the public run method and by the legacy pass.
   PreservedAnalyses runImpl(Function &F, DominatorTree &RunDT,
-                            AssumptionCache &RunAC);
+                            AssumptionCache &RunAC, ParallelRegionInfo &RunPRI);
 
   bool presplitLoadsAndStores(AllocaInst &AI, sroa::AllocaSlices &AS);
   AllocaInst *rewritePartition(AllocaInst &AI, sroa::AllocaSlices &AS,

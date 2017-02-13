@@ -26,6 +26,7 @@
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/IteratedDominanceFrontier.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/ParallelRegionInfo.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DIBuilder.h"
@@ -48,7 +49,13 @@ STATISTIC(NumSingleStore,   "Number of alloca's promoted with a single store");
 STATISTIC(NumDeadAlloca,    "Number of dead alloca's removed");
 STATISTIC(NumPHIInsert,     "Number of PHI nodes inserted");
 
-bool llvm::isAllocaPromotable(const AllocaInst *AI) {
+bool llvm::isAllocaPromotable(const AllocaInst *AI, const DominatorTree *DT,
+                              const ParallelRegionInfo *PRI) {
+  // If the dominator tree and parallel region info were given we check if the
+  // promotion would break any parallel region requirements.
+  if (PRI && DT && !PRI->isSafeToPromote(*AI, *DT))
+    return false;
+
   // FIXME: If the memory unit is of pointer or integer type, we can permit
   // assignments to subsections of the memory unit.
   unsigned AS = AI->getType()->getAddressSpace();

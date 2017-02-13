@@ -15,6 +15,7 @@
 #include "llvm/Transforms/Utils/Mem2Reg.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AssumptionCache.h"
+#include "llvm/Analysis/ParallelRegionInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
@@ -28,7 +29,8 @@ using namespace llvm;
 STATISTIC(NumPromoted, "Number of alloca's promoted");
 
 static bool promoteMemoryToRegister(Function &F, DominatorTree &DT,
-                                    AssumptionCache &AC) {
+                                    AssumptionCache &AC,
+                                    ParallelRegionInfo &PRI) {
   std::vector<AllocaInst *> Allocas;
   BasicBlock &BB = F.getEntryBlock(); // Get the entry node for the function
   bool Changed = false;
@@ -40,7 +42,7 @@ static bool promoteMemoryToRegister(Function &F, DominatorTree &DT,
     // the entry node
     for (BasicBlock::iterator I = BB.begin(), E = --BB.end(); I != E; ++I)
       if (AllocaInst *AI = dyn_cast<AllocaInst>(I)) // Is it an alloca?
-        if (isAllocaPromotable(AI))
+        if (isAllocaPromotable(AI, &DT, &PRI))
           Allocas.push_back(AI);
 
     if (Allocas.empty())
@@ -56,7 +58,8 @@ static bool promoteMemoryToRegister(Function &F, DominatorTree &DT,
 PreservedAnalyses PromotePass::run(Function &F, FunctionAnalysisManager &AM) {
   auto &DT = AM.getResult<DominatorTreeAnalysis>(F);
   auto &AC = AM.getResult<AssumptionAnalysis>(F);
-  if (!promoteMemoryToRegister(F, DT, AC))
+  auto &PRI = AM.getResult<ParallelRegionAnalysis>(F);
+  if (!promoteMemoryToRegister(F, DT, AC, PRI))
     return PreservedAnalyses::all();
 
   PreservedAnalyses PA;
@@ -81,12 +84,15 @@ struct PromoteLegacyPass : public FunctionPass {
     DominatorTree &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     AssumptionCache &AC =
         getAnalysis<AssumptionCacheTracker>().getAssumptionCache(F);
-    return promoteMemoryToRegister(F, DT, AC);
+    ParallelRegionInfo &PRI =
+        getAnalysis<ParallelRegionInfoPass>().getParallelRegionInfo();
+    return promoteMemoryToRegister(F, DT, AC, PRI);
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<AssumptionCacheTracker>();
     AU.addRequired<DominatorTreeWrapperPass>();
+    AU.addRequired<ParallelRegionInfoPass>();
     AU.setPreservesCFG();
   }
   };
@@ -98,6 +104,7 @@ INITIALIZE_PASS_BEGIN(PromoteLegacyPass, "mem2reg", "Promote Memory to "
                       false, false)
 INITIALIZE_PASS_DEPENDENCY(AssumptionCacheTracker)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(ParallelRegionInfoPass)
 INITIALIZE_PASS_END(PromoteLegacyPass, "mem2reg", "Promote Memory to Register",
                     false, false)
 

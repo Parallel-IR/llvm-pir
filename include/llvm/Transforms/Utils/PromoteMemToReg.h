@@ -22,6 +22,7 @@ class AllocaInst;
 class DominatorTree;
 class AliasSetTracker;
 class AssumptionCache;
+class ParallelRegionInfo;
 
 /// \brief Return true if this alloca is legal for promotion.
 ///
@@ -29,7 +30,12 @@ class AssumptionCache;
 /// (transitively) using this alloca. This also enforces that there is only
 /// ever one layer of bitcasts or GEPs between the alloca and the lifetime
 /// markers.
-bool isAllocaPromotable(const AllocaInst *AI);
+///
+/// In case the dominance tree and the parallel region info are _both_ given
+/// we also verify that promoting the alloca does not break invariants of the
+/// parallel regions. See ParallelRegionInfo::isSafeToPromote(*) for details.
+bool isAllocaPromotable(const AllocaInst *AI, const DominatorTree *DT = nullptr,
+                        const ParallelRegionInfo *PRI = nullptr);
 
 /// \brief Promote the specified list of alloca instructions into scalar
 /// registers, inserting PHI nodes as appropriate.
