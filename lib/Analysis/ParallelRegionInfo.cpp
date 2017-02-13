@@ -468,6 +468,8 @@ bool ParallelRegionInfo::maybeContainedInAny(const Loop *L,
 
 bool ParallelRegionInfo::isSafeToPromote(const AllocaInst &AI,
                                          const DominatorTree &DT) const {
+  if (TopLevelParallelRegions.empty())
+    return true;
 
   // First check if we know that AI is contained in a parallel region.
   ParallelRegion *AIPR = nullptr;
