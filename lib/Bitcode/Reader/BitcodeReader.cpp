@@ -3909,6 +3909,45 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       I = new UnreachableInst(Context);
       InstructionList.push_back(I);
       break;
+    case bitc::FUNC_CODE_INST_FORK: { // FORK: [bb#, bb#]
+      if (Record.size() != 2)
+        return error("Invalid record");
+      BasicBlock *Forked = getBasicBlock(Record[0]);
+      if (!Forked)
+        return error("Invalid record");
+
+      BasicBlock *Continue = getBasicBlock(Record[1]);
+      if (!Continue)
+        return error("Invalid record");
+
+      I = ForkInst::Create(Forked, Continue);
+      InstructionList.push_back(I);
+      break;
+    }
+    case bitc::FUNC_CODE_INST_HALT: { // HALT: [bb#]
+      if (Record.size() != 1)
+        return error("Invalid record");
+
+      BasicBlock *ForkContinue = getBasicBlock(Record[0]);
+      if (!ForkContinue)
+        return error("Invalid record");
+
+      I = HaltInst::Create(Context, ForkContinue);
+      InstructionList.push_back(I);
+      break;
+    }
+    case bitc::FUNC_CODE_INST_JOIN: { // JOIN: [bb#]
+      if (Record.size() != 1)
+        return error("Invalid record");
+
+      BasicBlock *Continue = getBasicBlock(Record[0]);
+      if (!Continue)
+        return error("Invalid record");
+
+      I = JoinInst::Create(Continue);
+      InstructionList.push_back(I);
+      break;
+    }
     case bitc::FUNC_CODE_INST_PHI: { // PHI: [ty, val0,bb0, ...]
       if (Record.size() < 1 || ((Record.size()-1)&1))
         return error("Invalid record");

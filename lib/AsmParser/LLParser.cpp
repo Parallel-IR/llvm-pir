@@ -5025,6 +5025,9 @@ int LLParser::ParseInstruction(Instruction *&Inst, BasicBlock *BB,
   case lltok::kw_catchswitch: return ParseCatchSwitch(Inst, PFS);
   case lltok::kw_catchpad:    return ParseCatchPad(Inst, PFS);
   case lltok::kw_cleanuppad:  return ParseCleanupPad(Inst, PFS);
+  case lltok::kw_fork:        return ParseFork(Inst, PFS);
+  case lltok::kw_halt:        return ParseHalt(Inst, PFS);
+  case lltok::kw_join:        return ParseJoin(Inst, PFS);
   // Binary Operators.
   case lltok::kw_add:
   case lltok::kw_sub:
@@ -5221,6 +5224,49 @@ bool LLParser::ParseBr(Instruction *&Inst, PerFunctionState &PFS) {
     return true;
 
   Inst = BranchInst::Create(Op1, Op2, Op0);
+  return false;
+}
+
+/// ParseFork
+///    ::= 'fork' TypeAndValue ',' Value
+bool LLParser::ParseFork(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy Loc, Loc2;
+  BasicBlock *ForkedBB;
+  Value *Op2;
+
+  if (ParseTypeAndBasicBlock(ForkedBB, Loc, PFS) ||
+      ParseToken(lltok::comma, "expected ',' after forked block") ||
+      ParseValue(ForkedBB->getType(), Op2, PFS))
+    return true;
+
+  BasicBlock *ContinuationBB = cast<BasicBlock>(Op2);
+  Inst = ForkInst::Create(ForkedBB, ContinuationBB);
+  return false;
+}
+
+/// ParseHalt
+///   ::= 'halt' TypeAndValue
+bool LLParser::ParseHalt(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy Loc;
+  BasicBlock *Op;
+
+  if (ParseTypeAndBasicBlock(Op, Loc, PFS))
+    return true;
+
+  Inst = HaltInst::Create(Context, Op);
+  return false;
+}
+
+/// ParseJoin
+///   ::= 'join' TypeAndValue
+bool LLParser::ParseJoin(Instruction *&Inst, PerFunctionState &PFS) {
+  LocTy Loc;
+  BasicBlock *Op;
+
+  if (ParseTypeAndBasicBlock(Op, Loc, PFS))
+    return true;
+
+  Inst = JoinInst::Create(Op);
   return false;
 }
 

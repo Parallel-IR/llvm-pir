@@ -4508,6 +4508,217 @@ private:
 };
 
 //===----------------------------------------------------------------------===//
+//                                 ForkInst Class
+//===----------------------------------------------------------------------===//
+
+//===---------------------------------------------------------------------------
+/// This class represents a fork terminator instruction
+  class ForkInst : public TerminatorInst {
+    /// Ops list - The operand are ordered: forked, continue
+    ForkInst(const ForkInst &FI);
+    void AssertOK();
+    // ForkInst constructors (where {F, C} are blocks):
+    // ForkInst(BB *F, BB *C)          - 'fork D, C'
+    // ForkInst(BB *F, BB *C, Inst *I) - 'fork D, C', insert before
+    // ForkInst(BB *F, BB *C, BB *I)   - 'fork D, C', insert at end
+    ForkInst(BasicBlock *Forked, BasicBlock *Continue,
+             Instruction *InsertBefore = nullptr);
+    ForkInst(BasicBlock *Forked, BasicBlock *Continue,
+             BasicBlock *InsertAtEnd);
+
+  protected:
+    // Note: Instruction needs to be friend here to call cloneImpl
+    friend class Instruction;
+    ForkInst *cloneImpl() const;
+
+  public:
+    static ForkInst *Create(BasicBlock *Forked, BasicBlock *Continue,
+                            Instruction *InsertBefore = nullptr) {
+      return new(2) ForkInst(Forked, Continue, InsertBefore);
+    }
+    static ForkInst *Create(BasicBlock *Forked, BasicBlock *Continue,
+                            BasicBlock *InsertAtEnd) {
+      return new(2) ForkInst(Forked, Continue, InsertAtEnd);
+    }
+
+    /// Transparently provide more efficient getOperand methods.
+    DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+    unsigned getNumSuccessors() const { return 2; }
+
+    BasicBlock *getSuccessor(unsigned i) const {
+      assert(i < 2 && "Successor # out of range for fork!");
+      return cast_or_null<BasicBlock>((&Op<0>() + i)->get());
+    }
+
+    void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+      assert(idx < 2 && "Successor # out of range for fork!");
+      *(&Op<0>() + idx) = (Value*)NewSucc;
+    }
+
+    /// Swap the successors of this fork instruction.
+    ///
+    /// Swaps the successors of the fork instruction. This also swaps any
+    /// branch weight metadata associated with the instruction so that it
+    /// continues to map correctly to each operand.
+    void swapSuccessors();
+
+    // Methods for support type inquiry through isa, cast, and dyn_cast:
+    static inline bool classof(const Instruction *I) {
+      return (I->getOpcode() == Instruction::Fork);
+    }
+    static inline bool classof(const Value *V) {
+      return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    }
+
+    inline BasicBlock* getForkedBB() const { return getSuccessor(0); }
+    inline BasicBlock* getContinuationBB() const { return getSuccessor(1); }
+  private:
+    BasicBlock *getSuccessorV(unsigned idx) const override;
+    unsigned getNumSuccessorsV() const override;
+    void setSuccessorV(unsigned idx, BasicBlock *B) override;
+  };
+
+  template <>
+  struct OperandTraits<ForkInst>
+      : public FixedNumOperandTraits<ForkInst, 2> {};
+
+  DEFINE_TRANSPARENT_OPERAND_ACCESSORS(ForkInst, Value)
+
+  //===----------------------------------------------------------------------===//
+  //                                 HaltInst Class
+  //===----------------------------------------------------------------------===//
+
+  //===---------------------------------------------------------------------------
+  /// HaltInst - Halt Instruction.
+  class HaltInst : public TerminatorInst {
+    HaltInst(const HaltInst &HI);
+    void AssertOK();
+    // HaltInst constructors (where F is a block):
+    // HaltInst(BB *F)
+    // HaltInst(BB *F, Inst *I) - insert before I
+    // HaltInst(BB *F, BB *I)   - insert at end
+    explicit HaltInst(LLVMContext &C, BasicBlock *ForkContinue,
+                      Instruction *InsertBefore = nullptr);
+    HaltInst(LLVMContext &C, BasicBlock *ForkContinue,
+             BasicBlock *InsertAtEnd);
+  protected:
+    // Note: Instruction needs to be friend here to call cloneImpl.
+    friend class Instruction;
+    HaltInst *cloneImpl() const;
+
+  public:
+    static HaltInst *Create(LLVMContext &C, BasicBlock *ForkContinue,
+                            Instruction *InsertBefore = nullptr) {
+      return new(1) HaltInst(C, ForkContinue, InsertBefore);
+    }
+    static HaltInst *Create(LLVMContext &C, BasicBlock *ForkContinue,
+                            BasicBlock *InsertAtEnd) {
+      return new(1) HaltInst(C, ForkContinue, InsertAtEnd);
+    }
+
+    /// Transparently provide more efficient getOperand methods.
+    DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+    unsigned getNumSuccessors() const { return 1; }
+
+    BasicBlock *getSuccessor(unsigned i) const {
+      assert(i == 0 && "Successor # out of range for halt!");
+      return cast_or_null<BasicBlock>((&Op<0>())->get());
+    }
+
+    void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+      assert(idx == 0 && "Successor # out of range for halt!");
+      *(&Op<0>()) = (Value*)NewSucc;
+    }
+
+    BasicBlock *getContinuationBB() const {
+      return cast_or_null<BasicBlock>((&Op<0>())->get());
+    }
+
+    // Methods for support type inquiry through isa, cast, and dyn_cast:
+    static inline bool classof(const Instruction *I) {
+      return (I->getOpcode() == Instruction::Halt);
+    }
+    static inline bool classof(const Value *V) {
+      return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    }
+
+  private:
+    BasicBlock *getSuccessorV(unsigned idx) const override;
+    unsigned getNumSuccessorsV() const override;
+    void setSuccessorV(unsigned idx, BasicBlock *B) override;
+ };
+
+  template<>
+  struct OperandTraits<HaltInst> : public FixedNumOperandTraits<HaltInst, 1> {};
+
+  DEFINE_TRANSPARENT_OPERAND_ACCESSORS(HaltInst, Value)
+
+  ///===----------------------------------------------------------------------===//
+  //                                 JoinInst Class
+  //===----------------------------------------------------------------------===//
+
+  //===---------------------------------------------------------------------------
+  /// JoinInst - Join Instruction
+  class JoinInst : public TerminatorInst {
+    /// Ops list - A join is like an unconditional branch to its continuation.
+    JoinInst(const JoinInst &SI);
+    void AssertOK();
+    // JoinInst constructor (where C is a block):
+    // JoinInst(BB *C)           - 'sync C'
+    // JoinInst(BB *C, Inst *I)  - 'sync C'    insert before I
+    // JoinInst(BB *C, BB *I)    - 'sync C'    insert at end
+    explicit JoinInst(BasicBlock *Continue, Instruction *InsertBefore = nullptr);
+    JoinInst(BasicBlock *Continue, BasicBlock *InsertAtEnd);
+  protected:
+    // Note: Instruction needs to be friend here to call cloneImpl.
+    friend class Instruction;
+    JoinInst *cloneImpl() const;
+
+  public:
+    static JoinInst *Create(BasicBlock *Continue, Instruction *InsertBefore = nullptr) {
+      return new(1) JoinInst(Continue, InsertBefore);
+    }
+    static JoinInst *Create(BasicBlock *Continue, BasicBlock *InsertAtEnd) {
+      return new(1) JoinInst(Continue, InsertAtEnd);
+    }
+
+    /// Transparently provide more efficient getOperand methods.
+    DECLARE_TRANSPARENT_OPERAND_ACCESSORS(Value);
+
+    unsigned getNumSuccessors() const { return 1; }
+
+    BasicBlock *getSuccessor(unsigned i) const {
+      assert(i == 0 && "Successor # out of range for join!");
+      return cast<BasicBlock>((&Op<0>())->get());
+    }
+
+    void setSuccessor(unsigned idx, BasicBlock *NewSucc) {
+      assert(idx == 0 && "Successor # out of range for join!");
+      *(&Op<0>()) = (Value*)NewSucc;
+    }
+
+    // Methods for support type inquiry through isa, cast, and dyn_cast:
+    static inline bool classof(const Instruction *I) {
+      return (I->getOpcode() == Instruction::Join);
+    }
+    static inline bool classof(const Value *V) {
+      return isa<Instruction>(V) && classof(cast<Instruction>(V));
+    }
+
+  private:
+    BasicBlock *getSuccessorV(unsigned idx) const override;
+    unsigned getNumSuccessorsV() const override;
+    void setSuccessorV(unsigned idx, BasicBlock *B) override;
+  };
+
+  template<>
+  struct OperandTraits<JoinInst> : public FixedNumOperandTraits<JoinInst, 1> {};
+
+  DEFINE_TRANSPARENT_OPERAND_ACCESSORS(JoinInst, Value)
+
+//===----------------------------------------------------------------------===//
 //                                 TruncInst Class
 //===----------------------------------------------------------------------===//
 

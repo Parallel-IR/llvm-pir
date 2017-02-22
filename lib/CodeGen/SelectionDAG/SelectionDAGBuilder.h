@@ -40,6 +40,7 @@ class DbgValueInst;
 class ExtractElementInst;
 class ExtractValueInst;
 class FCmpInst;
+class ForkInst;
 class FPExtInst;
 class FPToSIInst;
 class FPToUIInst;
@@ -48,6 +49,7 @@ class Function;
 class FunctionLoweringInfo;
 class GetElementPtrInst;
 class GCFunctionInfo;
+class HaltInst;
 class ICmpInst;
 class IntToPtrInst;
 class IndirectBrInst;
@@ -55,6 +57,7 @@ class InvokeInst;
 class InsertElementInst;
 class InsertValueInst;
 class Instruction;
+class JoinInst;
 class LoadInst;
 class MachineBasicBlock;
 class MachineInstr;
@@ -795,6 +798,9 @@ private:
   void visitCatchRet(const CatchReturnInst &I);
   void visitCatchPad(const CatchPadInst &I);
   void visitCleanupPad(const CleanupPadInst &CPI);
+  void visitFork(const ForkInst &I);
+  void visitHalt(const HaltInst &I);
+  void visitJoin(const JoinInst &I);
 
   BranchProbability getEdgeProbability(const MachineBasicBlock *Src,
                                        const MachineBasicBlock *Dst) const;

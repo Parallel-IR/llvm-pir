@@ -168,6 +168,44 @@ TEST(InstructionsTest, BranchInst) {
   delete bb1;
 }
 
+  TEST(InstructionTest, ForkInst) {
+    LLVMContext C;
+
+    // create fork destinations
+    BasicBlock *Forked = BasicBlock::Create(C);
+    BasicBlock *Continue = BasicBlock::Create(C);
+
+    // create fork instruction
+    ForkInst *Fork = ForkInst::Create(Forked, Continue);
+
+    EXPECT_EQ(Forked, Fork->getSuccessor(0));
+    EXPECT_EQ(Forked, Fork->getForkedBB());
+    EXPECT_EQ(Continue, Fork->getSuccessor(1));
+    EXPECT_EQ(Continue, Fork->getContinuationBB());
+
+    // test swapping destinations
+    Fork->swapSuccessors();
+
+    EXPECT_EQ(Forked, Fork->getSuccessor(1));
+    EXPECT_EQ(Forked, Fork->getContinuationBB());
+    EXPECT_EQ(Continue, Fork->getSuccessor(0));
+    EXPECT_EQ(Continue, Fork->getForkedBB());
+
+    EXPECT_NE(Forked, Fork->getSuccessor(0));
+    EXPECT_NE(Forked, Fork->getForkedBB());
+    EXPECT_NE(Continue, Fork->getSuccessor(1));
+    EXPECT_NE(Continue, Fork->getContinuationBB());
+
+    // test instruction type
+    EXPECT_TRUE(ForkInst::classof(Fork));
+
+    // clean up
+    delete Fork;
+
+    delete Forked;
+    delete Continue;
+  }
+
 TEST(InstructionsTest, CastInst) {
   LLVMContext C;
 

@@ -325,6 +325,11 @@ enum Kind {
   kw_insertvalue,
   kw_blockaddress,
 
+  // Parallel IR types
+  kw_fork,
+  kw_halt,
+  kw_join,
+
   // Metadata types.
   kw_distinct,
 

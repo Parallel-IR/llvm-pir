@@ -258,6 +258,9 @@ const char *Instruction::getOpcodeName(unsigned OpCode) {
   case CatchRet: return "catchret";
   case CatchPad: return "catchpad";
   case CatchSwitch: return "catchswitch";
+  case Fork:        return "fork";
+  case Halt:        return "halt";
+  case Join:        return "join";
 
   // Standard binary operators...
   case Add: return "add";

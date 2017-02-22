@@ -2654,7 +2654,25 @@ void ModuleBitcodeWriter::writeInstruction(const Instruction &I,
     Code = bitc::FUNC_CODE_INST_UNREACHABLE;
     AbbrevToUse = FUNCTION_INST_UNREACHABLE_ABBREV;
     break;
-
+  case Instruction::Fork: {
+    Code = bitc::FUNC_CODE_INST_FORK;
+    const ForkInst &FI = cast<ForkInst>(I);
+    Vals.push_back(VE.getValueID(FI.getSuccessor(0)));
+    Vals.push_back(VE.getValueID(FI.getSuccessor(1)));
+    break;
+  }
+  case Instruction::Halt: {
+    Code = bitc::FUNC_CODE_INST_HALT;
+    const HaltInst &HI = cast<HaltInst>(I);
+    Vals.push_back(VE.getValueID(HI.getSuccessor(0)));
+    break;
+  }
+  case Instruction::Join: {
+    Code = bitc::FUNC_CODE_INST_JOIN;
+    const JoinInst &JI = cast<JoinInst>(I);
+    Vals.push_back(VE.getValueID(JI.getSuccessor(0)));
+    break;
+  }
   case Instruction::PHI: {
     const PHINode &PN = cast<PHINode>(I);
     Code = bitc::FUNC_CODE_INST_PHI;

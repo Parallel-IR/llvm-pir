@@ -2448,6 +2448,60 @@ void SelectionDAGBuilder::visitUnreachable(const UnreachableInst &I) {
         DAG.getNode(ISD::TRAP, getCurSDLoc(), MVT::Other, DAG.getRoot()));
 }
 
+void SelectionDAGBuilder::visitFork(const llvm::ForkInst &I) {
+  MachineBasicBlock *ForkMBB = FuncInfo.MBB;
+
+  MachineBasicBlock *Forked = FuncInfo.MBBMap[I.getSuccessor(0)];
+
+  // Update machine-CFG edges
+  ForkMBB->addSuccessor(Forked);
+
+  // If this not a fall-trough branch or optimizations are switched off,
+  // emit the branch
+  if (Forked != NextBlock(ForkMBB) || TM.getOptLevel() == CodeGenOpt::None)
+    DAG.setRoot(DAG.getNode(ISD::BR, getCurSDLoc(),
+                            MVT::Other, getControlRoot(),
+                            DAG.getBasicBlock(Forked)));
+
+  return;
+}
+
+void SelectionDAGBuilder::visitHalt(const llvm::HaltInst &I) {
+  MachineBasicBlock *HaltMBB = FuncInfo.MBB;
+
+  MachineBasicBlock *Continue = FuncInfo.MBBMap[I.getSuccessor(0)];
+
+  // Update machine-CFG edges.
+  HaltMBB->addSuccessor(Continue);
+
+  // If this not a fall-trough branch or optimizations are switched off,
+  // emit the branch
+  if (Continue != NextBlock(HaltMBB) || TM.getOptLevel() == CodeGenOpt::None)
+    DAG.setRoot(DAG.getNode(ISD::BR, getCurSDLoc(),
+                            MVT::Other, getControlRoot(),
+                            DAG.getBasicBlock(Continue)));
+
+  return;
+}
+
+void SelectionDAGBuilder::visitJoin(const llvm::JoinInst &I) {
+  MachineBasicBlock *JoinMBB = FuncInfo.MBB;
+
+  MachineBasicBlock *Continue = FuncInfo.MBBMap[I.getSuccessor(0)];
+
+  // Update machine-CFG edges.
+  JoinMBB->addSuccessor(Continue);
+
+  // If this not a fall-trough branch or optimizations are switched off,
+  // emit the branch
+  if (Continue != NextBlock(JoinMBB) || TM.getOptLevel() == CodeGenOpt::None)
+    DAG.setRoot(DAG.getNode(ISD::BR, getCurSDLoc(),
+                            MVT::Other, getControlRoot(),
+                            DAG.getBasicBlock(Continue)));
+
+  return;
+}
+
 void SelectionDAGBuilder::visitFSub(const User &I) {
   // -0.0 - X --> fneg
   Type *Ty = I.getType();
