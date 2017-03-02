@@ -1,5 +1,6 @@
 add_llvm_library(LLVMPIR
   SequentializePIR.cpp
+  PIRToOpenMP.cpp
   PIR.cpp
 
   ADDITIONAL_HEADER_DIRS

@@ -273,6 +273,7 @@ void initializePGOInstrumentationGenLegacyPassPass(PassRegistry&);
 void initializePGOInstrumentationUseLegacyPassPass(PassRegistry&);
 void initializePHIEliminationPass(PassRegistry&);
 void initializePhysicalRegisterUsageInfoPass(PassRegistry &);
+  void initializePIRToOpenMPPassPass(PassRegistry&);
 void initializePartialInlinerLegacyPassPass(PassRegistry &);
 void initializePartiallyInlineLibCallsLegacyPassPass(PassRegistry &);
 void initializePatchableFunctionPass(PassRegistry &);

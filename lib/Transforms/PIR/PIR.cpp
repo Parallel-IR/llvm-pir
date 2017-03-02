@@ -13,4 +13,5 @@ using namespace llvm;
 
 void llvm::initializePIROpts(PassRegistry &Registry) {
   initializeSequentializePIRPass(Registry);
+  initializePIRToOpenMPPassPass(Registry);
 }
