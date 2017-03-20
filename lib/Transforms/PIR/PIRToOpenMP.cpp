@@ -8,7 +8,49 @@ void PIRToOMPPass::run(Function &F, FunctionAnalysisManager &AM) {
 
 // TODO double check for best practices, look at others code
 
-Function* emitTaskFunction(const ParallelRegion &PR, bool IsForked) {
+PointerType *PIRToOpenMPPass::getIdentTyPointerTy() const {
+  assert(IdentTy != nullptr && "IdentTy should have been initialized!");
+  return PointerType::getUnqual(IdentTy);
+}
+
+Type *PIRToOpenMPPass::getKmpc_MicroPointerTy(LLVMContext& Context) {
+  if (Kmpc_MicroTy == nullptr) {
+    Type *MicroParams[] = {PointerType::getUnqual(Type::getInt32Ty(Context)),
+                           PointerType::getUnqual(Type::getInt32Ty(Context))};
+    Kmpc_MicroTy = FunctionType::get(Type::getVoidTy(Context), MicroParams,
+                                     true);
+  }
+  return PointerType::getUnqual(Kmpc_MicroTy);
+}
+
+Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
+                                                 Module *M) {
+  Constant *RTLFn = nullptr;
+  switch(Function) {
+  case OMPRTL__kmpc_fork_call:
+    Type *TypeParams[] = {getIdentTyPointerTy(), Type::getInt32Ty(M->getContext()),
+                          getKmpc_MicroPointerTy(M->getContext())};
+    FunctionType *FnTy = FunctionType::get(Type::getVoidTy(M->getContext()), TypeParams,
+                                           true);
+    RTLFn = M->getOrInsertFunction("__kmpc_fork_call", FnTy);
+    break;
+  }
+  return RTLFn;
+}
+
+
+CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
+                                           ArrayRef<Value*> Args,
+                                           const Twine &Name,
+                                           BasicBlock *Parent) const {
+  // TODO check CodeGenFunction::EmitRuntimeCall for a more complete
+  // version of this
+  IRBuilder<> Builder(Parent);
+  CallInst *call = Builder.CreateCall(Callee, Args, None, Name);
+  return call;
+}
+
+Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR, bool IsForked) const {
   auto &F = *PR.getFork().getParent()->getParent();
   auto &M = *(Module*)F.getParent();
 
@@ -43,12 +85,10 @@ Function* emitTaskFunction(const ParallelRegion &PR, bool IsForked) {
 
   BranchInst::Create(PTFuncExitBB, &LastBB);
 
-  // PTFunction->dump();
-
   return PTFunction;
 }
 
-void emitRegionFunction(const ParallelRegion &PR) {
+void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) const {
   assert(PR.hasTwoSingleExits() && "More than 2 exits is yet to be handled");
 
   auto &F = *PR.getFork().getParent()->getParent();
@@ -63,61 +103,46 @@ void emitRegionFunction(const ParallelRegion &PR) {
   auto RFunction = (Function*)M.getOrInsertFunction(PRFName.str(),
                      Type::getVoidTy(M.getContext()),
                      NULL);
-
-  //  ParallelTask::VisitorTy Visitor = [RFunction](BasicBlock &BB, const ParallelTask &PT) -> bool {
-  //  BB.removeFromParent();
-  //  BB.insertInto(RFunction);
-  //  return true;
-  //};
-
-  //PR.visit(Visitor, true);
   BasicBlock *PRFuncEntryBB = BasicBlock::Create(M.getContext(), "entry", RFunction,
                                                  nullptr);
   BasicBlock *PRFuncExitBB = BasicBlock::Create(M.getContext(), "exit", RFunction,
                                                 nullptr);
 
-  JoinInst *JI = dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
+  IRBuilder<> ForkBBIRBuilder(ForkBB);
+  ForkBBIRBuilder.CreateAlloca(getIdentTyPointerTy());
   CallInst::Create(RFunction, "", ForkBB);
+  JoinInst *JI = dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
   BranchInst::Create(JI->getSuccessor(0), ForkBB);
   JI->setSuccessor(0, PRFuncExitBB);
 
-  // emit 2 outlined functions for forked and continuation tasks
+  // Emit 2 outlined functions for forked and continuation tasks
   auto ForkedFunction = emitTaskFunction(PR, true);
   auto ContFunction = emitTaskFunction(PR, false);
 
-  //PRFuncEntryBB->getInstList().splice(PRFuncEntryBB->getFirstInsertionPt(),
-  //                                    PR.getFork().getParent()->getInstList(),
-  //                                    PR.getFork().getIterator());
   PR.getFork().eraseFromParent();
 
   CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   CallInst::Create(ContFunction, "", PRFuncEntryBB);
   BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
-
   ReturnInst::Create(M.getContext(), PRFuncExitBB);
-
-  // for (auto BB = RFunction->begin(); BB != RFunction->end(); ++BB) {
-  //   auto I = BB->getTerminator();
-
-  //   if (ForkInst *FI = dyn_cast<ForkInst>(I)) {
-  //     BranchInst::Create(FI->getForkedBB(), I);
-  //     I->eraseFromParent();
-  //   } else if (HaltInst *HI = dyn_cast<HaltInst>(I)) {
-  //     BranchInst::Create(HI->getContinuationBB(), I);
-  //     I->eraseFromParent();
-  //   } else if (JoinInst *JI = dyn_cast<JoinInst>(I)) {
-  //     BranchInst::Create(JI->getSuccessor(0), I);
-  //     I->eraseFromParent();
-  //   }
-  // }
-
-  // RFunction->dump();
-  // F.dump();
 }
 
 bool PIRToOpenMPPass::runOnFunction(Function &F) {
   PRI = &getAnalysis<ParallelRegionInfoPass>().getParallelRegionInfo();
 
+  if (PRI->getTopLevelParallelRegions().size() > 0) {
+    auto M = (Module*)F.getParent();
+    if (M->getTypeByName("ident_t") == nullptr) {
+      IdentTy = StructType::create("ident_t",
+                                   Type::getInt32Ty(F.getContext()) /* reserved_1 */,
+                                   Type::getInt32Ty(F.getContext()) /* flags */,
+                                   Type::getInt32Ty(F.getContext()) /* reserved_2 */,
+                                   Type::getInt32Ty(F.getContext()) /* reserved_3 */,
+                                   Type::getInt8PtrTy(F.getContext()) /* psource */,
+                                   nullptr);
+    }
+  }
+  
   for (auto Region : PRI->getTopLevelParallelRegions())
     emitRegionFunction(*Region);
 
