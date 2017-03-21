@@ -1,4 +1,7 @@
 #include "llvm/Transforms/PIR/PIRToOpenMP.h"
+// TODO the way I traverse the regions now results in every one being
+// an top-level region. Modify that to traverse in reverse order instead.
+// But first make it work for simple regions.
 
 using namespace llvm;
 
@@ -8,19 +11,76 @@ void PIRToOMPPass::run(Function &F, FunctionAnalysisManager &AM) {
 
 // TODO double check for best practices, look at others code
 
+Type *PIRToOpenMPPass::getOrCreateIdentTy(Module *M) {
+  if (M->getTypeByName("ident_t") == nullptr) {
+    IdentTy = StructType::create("ident_t",
+                                 Type::getInt32Ty(M->getContext()) /* reserved_1 */,
+                                 Type::getInt32Ty(M->getContext()) /* flags */,
+                                 Type::getInt32Ty(M->getContext()) /* reserved_2 */,
+                                 Type::getInt32Ty(M->getContext()) /* reserved_3 */,
+                                 Type::getInt8PtrTy(M->getContext()) /* psource */,
+                                 nullptr);    
+  }
+
+  return IdentTy;
+}
+
 PointerType *PIRToOpenMPPass::getIdentTyPointerTy() const {
-  assert(IdentTy != nullptr && "IdentTy should have been initialized!");
   return PointerType::getUnqual(IdentTy);
 }
 
-Type *PIRToOpenMPPass::getKmpc_MicroPointerTy(LLVMContext& Context) {
+FunctionType *PIRToOpenMPPass::getOrCreateKmpc_MicroTy(LLVMContext& Context) {
   if (Kmpc_MicroTy == nullptr) {
     Type *MicroParams[] = {PointerType::getUnqual(Type::getInt32Ty(Context)),
                            PointerType::getUnqual(Type::getInt32Ty(Context))};
     Kmpc_MicroTy = FunctionType::get(Type::getVoidTy(Context), MicroParams,
                                      true);
   }
-  return PointerType::getUnqual(Kmpc_MicroTy);
+
+  return Kmpc_MicroTy; 
+}
+
+PointerType *PIRToOpenMPPass::getKmpc_MicroPointerTy(LLVMContext& Context) { 
+  return PointerType::getUnqual(getOrCreateKmpc_MicroTy(Context));
+}
+
+void PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
+  if (DefaultOpenMPPSource == nullptr) {
+    const std::string DefaultLocStr = ";unknown;unknown;0;0;;";
+    StringRef DefaultLocStrWithNull(DefaultLocStr.c_str(),
+                                    DefaultLocStr.size() + 1);
+    DataLayout DL(M);
+    // NOTE I am not sure this is the best way to calculate char alignment
+    // of the Module target. Revisit later.
+    uint64_t Alignment = DL.getTypeAllocSize(Type::getInt8Ty(M->getContext()));
+    Constant *C = ConstantDataArray::getString(M->getContext(), DefaultLocStrWithNull, false);
+    // NOTE Are heap allocations not recommended in general or is it OK here?
+    // I couldn't find a way to statically allocate an IRBuilder for a Module!
+    auto *GV = new GlobalVariable(*M, C->getType(), true, GlobalValue::PrivateLinkage,
+                                  C, ".str", nullptr, GlobalValue::NotThreadLocal);
+    GV->setAlignment(Alignment);
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    DefaultOpenMPPSource = cast<Constant>(GV);
+    DefaultOpenMPPSource = ConstantExpr::getBitCast(DefaultOpenMPPSource,
+                                                    Type::getInt8PtrTy(M->getContext()));
+  }
+
+  if (DefaultOpenMPLocation == nullptr) {
+    // Constant *C = ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true);
+    ArrayRef<Constant *> Members = {
+      ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true),
+      ConstantInt::get(Type::getInt32Ty(M->getContext()), 2, true),
+      ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true),
+      ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true),
+      DefaultOpenMPPSource
+    };
+    Constant *C = ConstantStruct::get(IdentTy, Members);
+    auto *GV = new GlobalVariable(*M, C->getType(), true, GlobalValue::PrivateLinkage,
+                                  C, "", nullptr, GlobalValue::NotThreadLocal);
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    GV->setAlignment(8);
+    DefaultOpenMPLocation = GV;
+  }
 }
 
 Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
@@ -38,19 +98,21 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
   return RTLFn;
 }
 
-
 CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
                                            ArrayRef<Value*> Args,
                                            const Twine &Name,
                                            BasicBlock *Parent) const {
-  // TODO check CodeGenFunction::EmitRuntimeCall for a more complete
-  // version of this
   IRBuilder<> Builder(Parent);
   CallInst *call = Builder.CreateCall(Callee, Args, None, Name);
   return call;
 }
 
-Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR, bool IsForked) const {
+void emitForkCall(Value *OutlinedFn) {
+  
+}
+
+Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR,
+                                            bool IsForked) const {
   auto &F = *PR.getFork().getParent()->getParent();
   auto &M = *(Module*)F.getParent();
 
@@ -59,8 +121,7 @@ Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR, bool IsFor
   auto PRName =  PR.getFork().getParent()->getName();
   auto PT = IsForked? PR.getForkedTask() : PR.getContinuationTask();
   auto PTName = PT.getEntry().getName();
-  auto PTFName = FName + "." + PRName + "." + PTName + ".outlined"
-    + (IsForked ? ".fork" : ".cont");
+  auto PTFName = FName + "." + PRName + "." + PTName;
 
   auto PTFunction = (Function*)M.getOrInsertFunction(PTFName.str(),
                       Type::getVoidTy(M.getContext()),
@@ -88,29 +149,43 @@ Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR, bool IsFor
   return PTFunction;
 }
 
-void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) const {
+void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   assert(PR.hasTwoSingleExits() && "More than 2 exits is yet to be handled");
 
   auto &F = *PR.getFork().getParent()->getParent();
   auto &M = *(Module*)F.getParent();
+  auto &C = M.getContext();
 
   // Generate the name of the outlined function for the region
   auto FName = F.getName();
   auto ForkBB = (BasicBlock*)PR.getFork().getParent();
   auto PRName =  ForkBB->getName();
-  auto PRFName = FName + "." + PRName + ".outlined";
+  auto PRFName = FName + "." + PRName;
+  FunctionType *RFunctionTy = nullptr;
+  Function *RFunction = nullptr;
 
-  auto RFunction = (Function*)M.getOrInsertFunction(PRFName.str(),
-                     Type::getVoidTy(M.getContext()),
-                     NULL);
-  BasicBlock *PRFuncEntryBB = BasicBlock::Create(M.getContext(), "entry", RFunction,
+  if (PR.isTopLevelRegion()) {
+    RFunction = (Function*)M.getOrInsertFunction(PRFName.str(),
+                                                 getOrCreateKmpc_MicroTy(C));
+  } else {
+    RFunctionTy = FunctionType::get(Type::getVoidTy(C), false);
+    RFunction = (Function*)M.getOrInsertFunction(PRFName.str(),
+                                                 RFunctionTy);
+  }
+
+  if (PR.isTopLevelRegion()) {
+    auto NullArg = ConstantPointerNull::get(PointerType::getUnqual(Type::getInt32Ty(C)));
+    ArrayRef<Value *> Args = { NullArg, NullArg };
+    CallInst::Create(RFunction, Args, "", ForkBB);
+  } else {
+    CallInst::Create(RFunction, "", ForkBB);
+  }
+  BasicBlock *PRFuncEntryBB = BasicBlock::Create(C, "entry", RFunction,
                                                  nullptr);
-  BasicBlock *PRFuncExitBB = BasicBlock::Create(M.getContext(), "exit", RFunction,
+  BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
                                                 nullptr);
 
   IRBuilder<> ForkBBIRBuilder(ForkBB);
-  ForkBBIRBuilder.CreateAlloca(getIdentTyPointerTy());
-  CallInst::Create(RFunction, "", ForkBB);
   JoinInst *JI = dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
   BranchInst::Create(JI->getSuccessor(0), ForkBB);
   JI->setSuccessor(0, PRFuncExitBB);
@@ -132,15 +207,8 @@ bool PIRToOpenMPPass::runOnFunction(Function &F) {
 
   if (PRI->getTopLevelParallelRegions().size() > 0) {
     auto M = (Module*)F.getParent();
-    if (M->getTypeByName("ident_t") == nullptr) {
-      IdentTy = StructType::create("ident_t",
-                                   Type::getInt32Ty(F.getContext()) /* reserved_1 */,
-                                   Type::getInt32Ty(F.getContext()) /* flags */,
-                                   Type::getInt32Ty(F.getContext()) /* reserved_2 */,
-                                   Type::getInt32Ty(F.getContext()) /* reserved_3 */,
-                                   Type::getInt8PtrTy(F.getContext()) /* psource */,
-                                   nullptr);
-    }
+    getOrCreateIdentTy(M);
+    getOrCreateDefaultLocation(M);
   }
   
   for (auto Region : PRI->getTopLevelParallelRegions())

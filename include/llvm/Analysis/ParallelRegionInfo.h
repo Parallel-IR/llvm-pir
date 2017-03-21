@@ -278,6 +278,10 @@ public:
   /// Return the parallel task that contains this parallel region.
   ParallelTask *getParentTask() const { return ParentTask; }
 
+  bool isTopLevelRegion() const {
+    return ParentTask == nullptr;
+  }
+
   /// Return the set of parallel sub-regions.
   ///{
   SubRegionMapTy &getSubRegions() { return ParallelSubRegions; }
