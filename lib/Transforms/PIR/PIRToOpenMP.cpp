@@ -155,6 +155,7 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   auto &F = *PR.getFork().getParent()->getParent();
   auto &M = *(Module*)F.getParent();
   auto &C = M.getContext();
+  DataLayout DL(&M);
 
   // Generate the name of the outlined function for the region
   auto FName = F.getName();
@@ -196,6 +197,47 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 
   PR.getFork().eraseFromParent();
 
+  if (PR.isTopLevelRegion()) {
+    // NOTE check clang's CodeGenFunction::EmitFunctionProlog for a general
+    // handling of function prologue emition
+
+    // NOTE according to the docs in CodeGenFunction.h, it is preferable
+    // to insert all alloca's at the start of the entry BB. But I am not
+    // sure about the technical reason for this. To check later.
+    auto Int32Ty = Type::getInt32Ty(C);
+    Value *Undef = UndefValue::get(Int32Ty);
+    auto AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "allocapt",
+                                                PRFuncEntryBB);
+
+    IRBuilder<> EntryBBIRBuilder2(PRFuncEntryBB,
+                                  ((Instruction*)AllocaInsertPt)->getIterator());
+    IRBuilder<> EntryBBIRBuilder(PRFuncEntryBB); 
+    auto &ArgList = RFunction->getArgumentList();
+
+    auto ArgI = ArgList.begin();
+    ArgI->setName(".global_tid.");
+    ArgI->addAttr(llvm::AttributeSet::get(C,
+                                          ArgI->getArgNo() + 1,
+                                          llvm::Attribute::NoAlias));
+    auto GtidAlloca = EntryBBIRBuilder2.CreateAlloca(ArgI->getType(), nullptr,
+                                                   ".global_tid..addr");
+    GtidAlloca->setAlignment(DL.getTypeAllocSize(ArgI->getType()));
+    EntryBBIRBuilder.CreateAlignedStore(&*ArgI, GtidAlloca,
+                                        DL.getTypeAllocSize(ArgI->getType()));
+
+    ++ArgI;
+    ArgI->setName(".bound_tid.");
+    ArgI->addAttr(llvm::AttributeSet::get(C,
+                                          ArgI->getArgNo() + 1,
+                                          llvm::Attribute::NoAlias));
+    auto BtidAlloca = EntryBBIRBuilder2.CreateAlloca(ArgI->getType(), nullptr,
+                                  ".bound_tid..addr");
+    BtidAlloca->setAlignment(DL.getTypeAllocSize(ArgI->getType()));
+    EntryBBIRBuilder.CreateAlignedStore(&*ArgI, BtidAlloca,
+                                        DL.getTypeAllocSize(ArgI->getType()));
+
+    AllocaInsertPt->eraseFromParent();
+  }
   CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   CallInst::Create(ContFunction, "", PRFuncEntryBB);
   BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
