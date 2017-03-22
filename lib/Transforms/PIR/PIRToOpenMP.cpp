@@ -209,32 +209,28 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
     auto AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "allocapt",
                                                 PRFuncEntryBB);
 
-    IRBuilder<> EntryBBIRBuilder2(PRFuncEntryBB,
+    IRBuilder<> AllocaIRBuilder(PRFuncEntryBB,
                                   ((Instruction*)AllocaInsertPt)->getIterator());
-    IRBuilder<> EntryBBIRBuilder(PRFuncEntryBB); 
-    auto &ArgList = RFunction->getArgumentList();
+    IRBuilder<> StoreIRBuilder(PRFuncEntryBB); 
 
+    auto emitArgProlog = [&](Argument &Arg, const Twine& Name) {
+      Arg.setName(Name);
+      Arg.addAttr(llvm::AttributeSet::get(C,
+                                            Arg.getArgNo() + 1,
+                                            llvm::Attribute::NoAlias));
+      auto GtidAlloca = AllocaIRBuilder.CreateAlloca(Arg.getType(), nullptr,
+                                                     Name + ".addr");
+      GtidAlloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
+      StoreIRBuilder.CreateAlignedStore(&Arg, GtidAlloca,
+                                        DL.getTypeAllocSize(Arg.getType()));
+    };
+
+    auto &ArgList = RFunction->getArgumentList();
     auto ArgI = ArgList.begin();
-    ArgI->setName(".global_tid.");
-    ArgI->addAttr(llvm::AttributeSet::get(C,
-                                          ArgI->getArgNo() + 1,
-                                          llvm::Attribute::NoAlias));
-    auto GtidAlloca = EntryBBIRBuilder2.CreateAlloca(ArgI->getType(), nullptr,
-                                                   ".global_tid..addr");
-    GtidAlloca->setAlignment(DL.getTypeAllocSize(ArgI->getType()));
-    EntryBBIRBuilder.CreateAlignedStore(&*ArgI, GtidAlloca,
-                                        DL.getTypeAllocSize(ArgI->getType()));
+    emitArgProlog(*ArgI, ".global_tid.");
 
     ++ArgI;
-    ArgI->setName(".bound_tid.");
-    ArgI->addAttr(llvm::AttributeSet::get(C,
-                                          ArgI->getArgNo() + 1,
-                                          llvm::Attribute::NoAlias));
-    auto BtidAlloca = EntryBBIRBuilder2.CreateAlloca(ArgI->getType(), nullptr,
-                                  ".bound_tid..addr");
-    BtidAlloca->setAlignment(DL.getTypeAllocSize(ArgI->getType()));
-    EntryBBIRBuilder.CreateAlignedStore(&*ArgI, BtidAlloca,
-                                        DL.getTypeAllocSize(ArgI->getType()));
+    emitArgProlog(*ArgI, ".bound_tid.");
 
     AllocaInsertPt->eraseFromParent();
   }
