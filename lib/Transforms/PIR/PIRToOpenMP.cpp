@@ -165,9 +165,24 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   FunctionType *RFunctionTy = nullptr;
   Function *RFunction = nullptr;
 
+  IRBuilder<> ForkBBIRBuilder(ForkBB);
+
   if (PR.isTopLevelRegion()) {
-    RFunction = (Function*)M.getOrInsertFunction(PRFName.str(),
-                                                 getOrCreateKmpc_MicroTy(C));
+    // NOTE check CodeGenFunction::GenerateOpenMPCapturedStmtFunction for
+    // details of this is done in OMP Clang. At least the outlined function
+    // is alaways created with InternalLinkage all the time.
+    RFunction = Function::Create(getOrCreateKmpc_MicroTy(C),
+                                 GlobalValue::InternalLinkage,
+                                 PRFName.str(), &M);
+    // Set to C coding convension
+    RFunction->setCallingConv(static_cast<CallingConv::ID>(0));
+
+    // NOTE for now, I only added the attributes that I think are required 
+    // Clang adds a huge set of other default attrs but I think they only
+    // affect the optimization of the code and not its correctness.
+    RFunction->addFnAttr(Attribute::NoUnwind);
+    RFunction->addFnAttr(Attribute::UWTable);
+    RFunction->addFnAttr(Attribute::NoReturn);
   } else {
     RFunctionTy = FunctionType::get(Type::getVoidTy(C), false);
     RFunction = (Function*)M.getOrInsertFunction(PRFName.str(),
@@ -175,9 +190,13 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   }
 
   if (PR.isTopLevelRegion()) {
-    auto NullArg = ConstantPointerNull::get(PointerType::getUnqual(Type::getInt32Ty(C)));
-    ArrayRef<Value *> Args = { NullArg, NullArg };
-    CallInst::Create(RFunction, Args, "", ForkBB);
+    ArrayRef<Value *> Args = {
+      DefaultOpenMPLocation,
+      ConstantInt::getSigned(Type::getInt32Ty(C), 0),
+      ForkBBIRBuilder.CreateBitCast(RFunction, getKmpc_MicroPointerTy(C))
+    };
+    auto ForkRTFn = createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, &M);
+    emitRuntimeCall(ForkRTFn, Args, "", ForkBB);
   } else {
     CallInst::Create(RFunction, "", ForkBB);
   }
@@ -186,7 +205,6 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
                                                 nullptr);
 
-  IRBuilder<> ForkBBIRBuilder(ForkBB);
   JoinInst *JI = dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
   BranchInst::Create(JI->getSuccessor(0), ForkBB);
   JI->setSuccessor(0, PRFuncExitBB);
@@ -198,15 +216,30 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   PR.getFork().eraseFromParent();
 
   if (PR.isTopLevelRegion()) {
+    emitImplicitArgs(PRFuncEntryBB);
+  }
+  CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
+  CallInst::Create(ContFunction, "", PRFuncEntryBB);
+  BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
+  ReturnInst::Create(M.getContext(), PRFuncExitBB);
+}
+
+void PIRToOpenMPPass::emitImplicitArgs(BasicBlock* PRFuncEntryBB) {
     // NOTE check clang's CodeGenFunction::EmitFunctionProlog for a general
     // handling of function prologue emition
+  auto RFunction = (Function*)PRFuncEntryBB->getParent();
+  auto &C = RFunction->getContext();
+  DataLayout DL(RFunction->getParent());
 
     // NOTE according to the docs in CodeGenFunction.h, it is preferable
     // to insert all alloca's at the start of the entry BB. But I am not
     // sure about the technical reason for this. To check later.
+    //
+    // It turns out this is to guarantee both performance and corrcetness,
+    // check http://llvm.org/docs/Frontend/PerformanceTips.html#use-of-allocas
     auto Int32Ty = Type::getInt32Ty(C);
     Value *Undef = UndefValue::get(Int32Ty);
-    auto AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "allocapt",
+    auto AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt",
                                                 PRFuncEntryBB);
 
     IRBuilder<> AllocaIRBuilder(PRFuncEntryBB,
@@ -233,11 +266,6 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
     emitArgProlog(*ArgI, ".bound_tid.");
 
     AllocaInsertPt->eraseFromParent();
-  }
-  CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
-  CallInst::Create(ContFunction, "", PRFuncEntryBB);
-  BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
-  ReturnInst::Create(M.getContext(), PRFuncExitBB);
 }
 
 bool PIRToOpenMPPass::runOnFunction(Function &F) {

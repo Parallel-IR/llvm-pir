@@ -21,11 +21,11 @@ namespace llvm {
   };
 
   class PIRToOpenMPPass : public FunctionPass {
-    ParallelRegionInfo *PRI;
-    StructType *IdentTy;
-    FunctionType *Kmpc_MicroTy;
-    Constant *DefaultOpenMPPSource;
-    Constant *DefaultOpenMPLocation;
+    ParallelRegionInfo *PRI = nullptr;
+    StructType *IdentTy = nullptr;
+    FunctionType *Kmpc_MicroTy = nullptr;
+    Constant *DefaultOpenMPPSource = nullptr;
+    Constant *DefaultOpenMPLocation = nullptr;
 
     Type *getOrCreateIdentTy(Module *M);
     PointerType *getIdentTyPointerTy() const;
@@ -40,7 +40,8 @@ namespace llvm {
                               BasicBlock *Parent) const;
     Function* emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
     void emitRegionFunction(const ParallelRegion &PR);
-
+    void emitImplicitArgs(BasicBlock* PRFuncEntryBB);
+    
   public:
     static char ID;
     PIRToOpenMPPass() : FunctionPass(ID) {
