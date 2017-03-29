@@ -9,7 +9,11 @@
 
 namespace llvm {
   enum OpenMPRuntimeFunction {
-    OMPRTL__kmpc_fork_call
+    OMPRTL__kmpc_fork_call,
+  };
+
+  enum OpenMPSchedType {
+    OMP_sch_static = 34,
   };
 
   class PIRToOMPPass : public PassInfoMixin<PIRToOMPPass> {
@@ -31,23 +35,39 @@ namespace llvm {
     IRBuilder<> *AllocaIRBuilder;
     IRBuilder<> *StoreIRBuilder;
 
+    // Maps a funtion representing an outlined top-level region to the alloca
+    // instruction of its thread id.
+    typedef DenseMap<Function *, Value *> OpenMPThreadIDAllocaMapTy;
+    OpenMPThreadIDAllocaMapTy OpenMPThreadIDAllocaMap;
+
+    // Maps a funtion to the instruction where we loaded the thread id addrs
+    typedef DenseMap<Function *, Value *> OpenMPThreadIDLoadMapTy;
+    OpenMPThreadIDLoadMapTy OpenMPThreadIDLoadMap;
+
     Type *getOrCreateIdentTy(Module *M);
     PointerType *getIdentTyPointerTy() const;
     FunctionType *getOrCreateKmpc_MicroTy(LLVMContext& Context);
     PointerType *getKmpc_MicroPointerTy(LLVMContext& Context);
-    void getOrCreateDefaultLocation(Module *M);
+    Value *getOrCreateDefaultLocation(Module *M);
     Constant *createRuntimeFunction(OpenMPRuntimeFunction Function,
                                     Module *M);
     CallInst *emitRuntimeCall(Value *Callee,
                               ArrayRef<Value*> Args,
                               const Twine &Name,
                               BasicBlock *Parent) const;
+    CallInst *emitRuntimeCall(Value *Callee,
+                                               ArrayRef<Value*> Args,
+                                               const Twine &Name) const;
     Function* emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
     void emitRegionFunction(const ParallelRegion &PR);
     void emitImplicitArgs(BasicBlock* PRFuncEntryBB);
-    void emitSections(LLVMContext &C, const DataLayout &DL);
+    void emitSections(Function *F, LLVMContext &C, const DataLayout &DL);
     AllocaInst *createSectionVal(Type *Ty, const Twine &Name, const DataLayout &DL,
                                  Value *Init = nullptr);
+
+    Value *getThreadID(Function *F, const DataLayout &DL);
+    Constant *createForStaticInitFunction(Module *M, unsigned IVSize,
+                                                           bool IVSigned);
   public:
     static char ID;
   PIRToOpenMPPass() : FunctionPass(ID), PRI(nullptr), IdentTy(nullptr),

@@ -44,7 +44,7 @@ PointerType *PIRToOpenMPPass::getKmpc_MicroPointerTy(LLVMContext& Context) {
   return PointerType::getUnqual(getOrCreateKmpc_MicroTy(Context));
 }
 
-void PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
+Value *PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
   if (DefaultOpenMPPSource == nullptr) {
     const std::string DefaultLocStr = ";unknown;unknown;0;0;;";
     StringRef DefaultLocStrWithNull(DefaultLocStr.c_str(),
@@ -81,6 +81,8 @@ void PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
     GV->setAlignment(8);
     DefaultOpenMPLocation = GV;
   }
+
+  return DefaultOpenMPLocation;
 }
 
 Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
@@ -98,12 +100,46 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
   return RTLFn;
 }
 
+Constant *PIRToOpenMPPass::createForStaticInitFunction(Module *M, unsigned IVSize,
+                                      bool IVSigned) {
+  assert((IVSize == 32 || IVSize == 64) &&
+         "IV size is not compatible with the omp runtime");
+  auto &C = M->getContext();
+  auto Name = IVSize == 32 ? (IVSigned ? "__kmpc_for_static_init_4"
+                              : "__kmpc_for_static_init_4u")
+    : (IVSigned ? "__kmpc_for_static_init_8"
+       : "__kmpc_for_static_init_8u");
+  auto ITy = IVSize == 32 ? Type::getInt32Ty(C) : Type::getInt64Ty(C);
+  auto PtrTy = llvm::PointerType::getUnqual(ITy);
+  llvm::Type *TypeParams[] = {
+    getIdentTyPointerTy(),                     // loc
+    Type::getInt32Ty(C),                               // tid
+    Type::getInt32Ty(C),                               // schedtype
+    llvm::PointerType::getUnqual(Type::getInt32Ty(C)), // p_lastiter
+    PtrTy,                                     // p_lower
+    PtrTy,                                     // p_upper
+    PtrTy,                                     // p_stride
+    ITy,                                       // incr
+    ITy                                        // chunk
+  };
+  FunctionType *FnTy =
+    FunctionType::get(Type::getVoidTy(C), TypeParams, /*isVarArg*/ false);
+  return M->getOrInsertFunction(Name, FnTy);
+}
+
 CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
                                            ArrayRef<Value*> Args,
                                            const Twine &Name,
                                            BasicBlock *Parent) const {
   IRBuilder<> Builder(Parent);
   CallInst *call = Builder.CreateCall(Callee, Args, None, Name);
+  return call;
+}
+
+CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
+                                           ArrayRef<Value*> Args,
+                                           const Twine &Name) const {
+  CallInst *call = StoreIRBuilder->CreateCall(Callee, Args, None, Name);
   return call;
 }
 
@@ -221,7 +257,7 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 
   if (PR.isTopLevelRegion()) {
     emitImplicitArgs(PRFuncEntryBB);
-    emitSections(C, DL);
+    emitSections(RFunction, C, DL);
   }
   CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   CallInst::Create(ContFunction, "", PRFuncEntryBB);
@@ -235,15 +271,43 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   StoreIRBuilder = nullptr;
 }
 
-void PIRToOpenMPPass::emitSections(LLVMContext &C, const DataLayout &DL) {
+// NOTE check CodeGenFunction::EmitSections for more details
+void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout &DL) {
   auto Int32Ty = Type::getInt32Ty(C);
-  createSectionVal(Int32Ty, ".omp.sections.lb.", DL, ConstantInt::get(Int32Ty, 0, true));
+  auto LB = createSectionVal(Int32Ty, ".omp.sections.lb.", DL, ConstantInt::get(Int32Ty, 0, true));
   // NOTE For now the num of sections is fixed to 1 and as a result simple
   // (i.e. non-nested) regions are handled.
-  auto *NumSections = ConstantInt::get(Int32Ty, 1, true);
-  createSectionVal(Int32Ty, ".omp.sections.ub.", DL, NumSections);
-  createSectionVal(Int32Ty, ".omp.sections.st.", DL, ConstantInt::get(Int32Ty, 1, true));
-  createSectionVal(Int32Ty, ".omp.sections.il.", DL, ConstantInt::get(Int32Ty, 0, true));
+  auto GlobalUBVal = StoreIRBuilder->getInt32(1);
+  auto UB = createSectionVal(Int32Ty, ".omp.sections.ub.", DL, GlobalUBVal);
+  auto ST = createSectionVal(Int32Ty, ".omp.sections.st.", DL, ConstantInt::get(Int32Ty, 1, true));
+  auto IL = createSectionVal(Int32Ty, ".omp.sections.il.", DL, ConstantInt::get(Int32Ty, 0, true));
+  auto IV = createSectionVal(Int32Ty, ".omp.sections.iv.", DL);
+  auto ThreadID = getThreadID(F, DL);
+
+  auto ForStaticInitFunction = createForStaticInitFunction(F->getParent(), 32, true);
+  // NOTE this is code emittion for our specific case; for a complete implementation
+  // , in case it is needed later, check emitForStaticInitCall in Clang
+  llvm::Value *Args[] = {
+    getOrCreateDefaultLocation(F->getParent()), ThreadID, ConstantInt::get(Int32Ty, OpenMPSchedType::OMP_sch_static), // Schedule type
+    IL,                                  // &isLastIter
+    LB,                                  // &LB
+    UB,                                  // &UB
+    ST,                                  // &Stride
+    StoreIRBuilder->getIntN(32, 1),                   // Incr
+    StoreIRBuilder->getIntN(32, 1)// Chunk
+  };
+  emitRuntimeCall(ForStaticInitFunction, Args, "");
+
+  auto *UBVal = StoreIRBuilder->CreateLoad(UB);
+  UBVal->setAlignment(DL.getTypeAllocSize(UBVal->getType()));
+  auto *MinUBGlobalUB = StoreIRBuilder->CreateSelect(
+                                                     StoreIRBuilder->CreateICmpSLT(UBVal, GlobalUBVal), UBVal, GlobalUBVal);
+  auto *Temp = StoreIRBuilder->CreateStore(MinUBGlobalUB, UB);
+  Temp->setAlignment(DL.getTypeAllocSize(MinUBGlobalUB->getType()));
+  auto *LBVal = StoreIRBuilder->CreateLoad(LB);
+  LBVal->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
+  Temp = StoreIRBuilder->CreateStore(LBVal, IV);
+  Temp->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
 }
 
 AllocaInst *PIRToOpenMPPass::createSectionVal(Type *Ty, const Twine &Name,
@@ -255,6 +319,36 @@ AllocaInst *PIRToOpenMPPass::createSectionVal(Type *Ty, const Twine &Name,
                                        DL.getTypeAllocSize(Ty));
   }
   return Alloca;
+}
+
+// NOTE check CGOpenMPRuntime::getThreadID for more details
+Value *PIRToOpenMPPass::getThreadID(Function *F, const DataLayout &DL) {
+  LoadInst *ThreadID = nullptr;
+  auto I = OpenMPThreadIDLoadMap.find(F);
+  if (I != OpenMPThreadIDLoadMap.end()) {
+    ThreadID = (LoadInst *)I->second;
+    assert(ThreadID != nullptr && "A null thread ID associated to F");
+    return ThreadID;
+  }
+
+  auto I2 = OpenMPThreadIDAllocaMap.find(F);
+  // If F is a top-level region function; get its thread ID alloca and emit
+  // a load
+  if (I2 != OpenMPThreadIDAllocaMap.end()) {
+    auto Alloca = I2->second;
+    auto ThreadIDAddrs = StoreIRBuilder->CreateLoad(Alloca);
+    ThreadIDAddrs->setAlignment(DL.getTypeAllocSize(ThreadIDAddrs->getType()));
+    ThreadID = StoreIRBuilder->CreateLoad(ThreadIDAddrs);
+    ThreadID->setAlignment(DL.getTypeAllocSize(ThreadID->getType()));
+    auto &Elem = OpenMPThreadIDLoadMap.FindAndConstruct(F);
+    Elem.second = ThreadID;
+    return ThreadID;
+  }
+
+  // TODO if we are not in a top-level region function a runtime call should
+  // be emitted instead; since there is no implicit argument representing
+  // the thread ID.
+  return nullptr;
 }
 
 void PIRToOpenMPPass::emitImplicitArgs(BasicBlock* PRFuncEntryBB) {
@@ -277,16 +371,21 @@ void PIRToOpenMPPass::emitImplicitArgs(BasicBlock* PRFuncEntryBB) {
       Arg.addAttr(llvm::AttributeSet::get(C,
                                             Arg.getArgNo() + 1,
                                             llvm::Attribute::NoAlias));
-      auto GtidAlloca = AllocaIRBuilder->CreateAlloca(Arg.getType(), nullptr,
+      auto Alloca = AllocaIRBuilder->CreateAlloca(Arg.getType(), nullptr,
                                                      Name + ".addr");
-      GtidAlloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
-      StoreIRBuilder->CreateAlignedStore(&Arg, GtidAlloca,
+      Alloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
+      StoreIRBuilder->CreateAlignedStore(&Arg, Alloca,
                                         DL.getTypeAllocSize(Arg.getType()));
+      return (Value*)Alloca;
     };
 
     auto &ArgList = RFunction->getArgumentList();
     auto ArgI = ArgList.begin();
-    emitArgProlog(*ArgI, ".global_tid.");
+    auto GtidAlloca = emitArgProlog(*ArgI, ".global_tid.");
+    // Add an entry for the current function (representing an outlined outer
+    // region) and its associated global thread id address
+    auto &Elem = OpenMPThreadIDAllocaMap.FindAndConstruct(RFunction);
+    Elem.second = GtidAlloca;
 
     ++ArgI;
     emitArgProlog(*ArgI, ".bound_tid.");
