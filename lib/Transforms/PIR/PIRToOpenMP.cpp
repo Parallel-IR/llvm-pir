@@ -107,10 +107,6 @@ CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
   return call;
 }
 
-void emitForkCall(Value *OutlinedFn) {
-  
-}
-
 Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR,
                                             bool IsForked) const {
   auto &F = *PR.getFork().getParent()->getParent();
@@ -215,13 +211,50 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 
   PR.getFork().eraseFromParent();
 
+  auto Int32Ty = Type::getInt32Ty(C);
+  Value *Undef = UndefValue::get(Int32Ty);
+  AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt",
+                                   PRFuncEntryBB);
+  AllocaIRBuilder = new IRBuilder<>(PRFuncEntryBB,
+                                    ((Instruction*)AllocaInsertPt)->getIterator());
+  StoreIRBuilder = new IRBuilder<>(PRFuncEntryBB); 
+
   if (PR.isTopLevelRegion()) {
     emitImplicitArgs(PRFuncEntryBB);
+    emitSections(C, DL);
   }
   CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   CallInst::Create(ContFunction, "", PRFuncEntryBB);
   BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
   ReturnInst::Create(M.getContext(), PRFuncExitBB);
+
+  AllocaInsertPt->eraseFromParent();
+  delete AllocaIRBuilder;
+  AllocaIRBuilder = nullptr;
+  delete StoreIRBuilder;
+  StoreIRBuilder = nullptr;
+}
+
+void PIRToOpenMPPass::emitSections(LLVMContext &C, const DataLayout &DL) {
+  auto Int32Ty = Type::getInt32Ty(C);
+  createSectionVal(Int32Ty, ".omp.sections.lb.", DL, ConstantInt::get(Int32Ty, 0, true));
+  // NOTE For now the num of sections is fixed to 1 and as a result simple
+  // (i.e. non-nested) regions are handled.
+  auto *NumSections = ConstantInt::get(Int32Ty, 1, true);
+  createSectionVal(Int32Ty, ".omp.sections.ub.", DL, NumSections);
+  createSectionVal(Int32Ty, ".omp.sections.st.", DL, ConstantInt::get(Int32Ty, 1, true));
+  createSectionVal(Int32Ty, ".omp.sections.il.", DL, ConstantInt::get(Int32Ty, 0, true));
+}
+
+AllocaInst *PIRToOpenMPPass::createSectionVal(Type *Ty, const Twine &Name,
+                                              const DataLayout &DL, Value *Init) {
+  auto Alloca = AllocaIRBuilder->CreateAlloca(Ty, nullptr, Name);
+  Alloca->setAlignment(DL.getTypeAllocSize(Ty));
+  if (Init) {
+    StoreIRBuilder->CreateAlignedStore(Init, Alloca,
+                                       DL.getTypeAllocSize(Ty));
+  }
+  return Alloca;
 }
 
 void PIRToOpenMPPass::emitImplicitArgs(BasicBlock* PRFuncEntryBB) {
@@ -237,24 +270,17 @@ void PIRToOpenMPPass::emitImplicitArgs(BasicBlock* PRFuncEntryBB) {
     //
     // It turns out this is to guarantee both performance and corrcetness,
     // check http://llvm.org/docs/Frontend/PerformanceTips.html#use-of-allocas
-    auto Int32Ty = Type::getInt32Ty(C);
-    Value *Undef = UndefValue::get(Int32Ty);
-    auto AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt",
-                                                PRFuncEntryBB);
-
-    IRBuilder<> AllocaIRBuilder(PRFuncEntryBB,
-                                  ((Instruction*)AllocaInsertPt)->getIterator());
-    IRBuilder<> StoreIRBuilder(PRFuncEntryBB); 
+    
 
     auto emitArgProlog = [&](Argument &Arg, const Twine& Name) {
       Arg.setName(Name);
       Arg.addAttr(llvm::AttributeSet::get(C,
                                             Arg.getArgNo() + 1,
                                             llvm::Attribute::NoAlias));
-      auto GtidAlloca = AllocaIRBuilder.CreateAlloca(Arg.getType(), nullptr,
+      auto GtidAlloca = AllocaIRBuilder->CreateAlloca(Arg.getType(), nullptr,
                                                      Name + ".addr");
       GtidAlloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
-      StoreIRBuilder.CreateAlignedStore(&Arg, GtidAlloca,
+      StoreIRBuilder->CreateAlignedStore(&Arg, GtidAlloca,
                                         DL.getTypeAllocSize(Arg.getType()));
     };
 
@@ -264,8 +290,6 @@ void PIRToOpenMPPass::emitImplicitArgs(BasicBlock* PRFuncEntryBB) {
 
     ++ArgI;
     emitArgProlog(*ArgI, ".bound_tid.");
-
-    AllocaInsertPt->eraseFromParent();
 }
 
 bool PIRToOpenMPPass::runOnFunction(Function &F) {
