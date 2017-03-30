@@ -257,7 +257,7 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 
   if (PR.isTopLevelRegion()) {
     emitImplicitArgs(PRFuncEntryBB);
-    emitSections(RFunction, C, DL);
+    emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
   }
   // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   // CallInst::Create(ContFunction, "", PRFuncEntryBB);
@@ -274,7 +274,8 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 }
 
 // NOTE check CodeGenFunction::EmitSections for more details
-void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout &DL) {
+void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
+                                   Function *ForkedFn, Function *ContFn) {
   auto Int32Ty = Type::getInt32Ty(C);
   auto LB = createSectionVal(Int32Ty, ".omp.sections.lb.", DL, ConstantInt::get(Int32Ty, 0, true));
   // NOTE For now the num of sections is fixed to 1 and as a result simple
@@ -285,6 +286,23 @@ void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout
   auto IL = createSectionVal(Int32Ty, ".omp.sections.il.", DL, ConstantInt::get(Int32Ty, 0, true));
   auto IV = createSectionVal(Int32Ty, ".omp.sections.iv.", DL);
   auto ThreadID = getThreadID(F, DL);
+
+  auto BodyGen = [this, F, &C, &DL, &IV, ForkedFn, ContFn]() {
+    auto *ExitBB = BasicBlock::Create(C, ".omp.sections.exit");
+    auto *SwitchStmt = StoreIRBuilder->CreateSwitch(emitAlignedLoad(IV, DL),
+                                                    ExitBB, 2);
+    auto CaseGen = [this, F, &C, ExitBB, SwitchStmt](int TaskNum, Function *TaskFn) {
+      auto CaseBB = BasicBlock::Create(C, ".omp.sections.case");
+      emitBlock(F, CaseBB);
+      StoreIRBuilder->CreateCall(TaskFn);
+      SwitchStmt->addCase(StoreIRBuilder->getInt32(TaskNum),  CaseBB);
+      emitBranch(ExitBB);
+    };
+
+    CaseGen(0, ForkedFn);
+    CaseGen(1, ContFn);
+    emitBlock(F, ExitBB, true);
+  };
 
   auto ForStaticInitFunction = createForStaticInitFunction(F->getParent(), 32, true);
   // NOTE this is code emittion for our specific case; for a complete implementation
@@ -303,19 +321,16 @@ void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout
   auto *UBVal = emitAlignedLoad(UB, DL);
   auto *MinUBGlobalUB = StoreIRBuilder->CreateSelect(
                                                      StoreIRBuilder->CreateICmpSLT(UBVal, GlobalUBVal), UBVal, GlobalUBVal);
-  auto *Temp = StoreIRBuilder->CreateStore(MinUBGlobalUB, UB);
-  Temp->setAlignment(DL.getTypeAllocSize(MinUBGlobalUB->getType()));
-  // auto *LBVal = StoreIRBuilder->CreateLoad(LB);
-  // LBVal->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
+  emitAlignedStore(MinUBGlobalUB, UB, DL);
   auto *LBVal = emitAlignedLoad(LB, DL);
-  Temp = StoreIRBuilder->CreateStore(LBVal, IV);
-  Temp->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
+  emitAlignedStore(LBVal, IV, DL);
 
-  emitOMPInnerLoop(F, C, DL, IV, UB);
+  emitOMPInnerLoop(F, C, DL, IV, UB, BodyGen);
 }
 
 void PIRToOpenMPPass::emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout& DL,
-                                       Value *IV, Value *UB) {
+                                       Value *IV, Value *UB,
+                                       const function_ref<void()> &BodyGen) {
   auto CondBlock = BasicBlock::Create(C, "omp.inner.for.cond");
   emitBlock(F, CondBlock);
 
@@ -325,6 +340,7 @@ void PIRToOpenMPPass::emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLa
 
   emitForLoopCond(DL, IV, UB, LoopBody, ExitBlock);
   emitBlock(F, LoopBody);
+  BodyGen();
   emitBlock(F, Continue);
   emitForLoopInc(IV, DL);
   emitBranch(CondBlock);

@@ -61,7 +61,8 @@ namespace llvm {
     Function* emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
     void emitRegionFunction(const ParallelRegion &PR);
     void emitImplicitArgs(BasicBlock* PRFuncEntryBB);
-    void emitSections(Function *F, LLVMContext &C, const DataLayout &DL);
+    void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
+                      Function *ForkedFn, Function *ContFn);
     AllocaInst *createSectionVal(Type *Ty, const Twine &Name, const DataLayout &DL,
                                  Value *Init = nullptr);
 
@@ -69,7 +70,7 @@ namespace llvm {
     Constant *createForStaticInitFunction(Module *M, unsigned IVSize,
                                                            bool IVSigned);
     void emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout& DL,
-                          Value *IV, Value *UB);
+                          Value *IV, Value *UB, const function_ref<void()> &BodyGen);
     void emitBlock(Function *F, BasicBlock *BB, bool IsFinished=false);
     void emitBranch(BasicBlock *Target);
     void emitForLoopCond(const DataLayout& DL, Value *IV, Value *UB, BasicBlock *Body,
