@@ -68,6 +68,15 @@ namespace llvm {
     Value *getThreadID(Function *F, const DataLayout &DL);
     Constant *createForStaticInitFunction(Module *M, unsigned IVSize,
                                                            bool IVSigned);
+    void emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout& DL,
+                          Value *IV, Value *UB);
+    void emitBlock(Function *F, BasicBlock *BB, bool IsFinished=false);
+    void emitBranch(BasicBlock *Target);
+    void emitForLoopCond(const DataLayout& DL, Value *IV, Value *UB, BasicBlock *Body,
+                                          BasicBlock *Exit);
+    Value *emitAlignedLoad(Value *Addr, const DataLayout& DL);
+    void emitForLoopInc(Value *IV, const DataLayout& DL);
+    void emitAlignedStore(Value *Val, Value *Addr, const DataLayout& DL);
   public:
     static char ID;
   PIRToOpenMPPass() : FunctionPass(ID), PRI(nullptr), IdentTy(nullptr),

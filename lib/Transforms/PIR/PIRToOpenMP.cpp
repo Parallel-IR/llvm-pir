@@ -234,12 +234,12 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   }
   BasicBlock *PRFuncEntryBB = BasicBlock::Create(C, "entry", RFunction,
                                                  nullptr);
-  BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
-                                                nullptr);
+  // BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
+                                                // nullptr);
 
   JoinInst *JI = dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
   BranchInst::Create(JI->getSuccessor(0), ForkBB);
-  JI->setSuccessor(0, PRFuncExitBB);
+  // JI->setSuccessor(0, PRFuncExitBB);
 
   // Emit 2 outlined functions for forked and continuation tasks
   auto ForkedFunction = emitTaskFunction(PR, true);
@@ -259,10 +259,12 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
     emitImplicitArgs(PRFuncEntryBB);
     emitSections(RFunction, C, DL);
   }
-  CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
-  CallInst::Create(ContFunction, "", PRFuncEntryBB);
-  BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
-  ReturnInst::Create(M.getContext(), PRFuncExitBB);
+  // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
+  // CallInst::Create(ContFunction, "", PRFuncEntryBB);
+  // BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
+  // ReturnInst::Create(M.getContext(), PRFuncExitBB);
+  StoreIRBuilder->CreateRetVoid();
+  RFunction->dump();
 
   AllocaInsertPt->eraseFromParent();
   delete AllocaIRBuilder;
@@ -298,16 +300,92 @@ void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout
   };
   emitRuntimeCall(ForStaticInitFunction, Args, "");
 
-  auto *UBVal = StoreIRBuilder->CreateLoad(UB);
-  UBVal->setAlignment(DL.getTypeAllocSize(UBVal->getType()));
+  auto *UBVal = emitAlignedLoad(UB, DL);
   auto *MinUBGlobalUB = StoreIRBuilder->CreateSelect(
                                                      StoreIRBuilder->CreateICmpSLT(UBVal, GlobalUBVal), UBVal, GlobalUBVal);
   auto *Temp = StoreIRBuilder->CreateStore(MinUBGlobalUB, UB);
   Temp->setAlignment(DL.getTypeAllocSize(MinUBGlobalUB->getType()));
-  auto *LBVal = StoreIRBuilder->CreateLoad(LB);
-  LBVal->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
+  // auto *LBVal = StoreIRBuilder->CreateLoad(LB);
+  // LBVal->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
+  auto *LBVal = emitAlignedLoad(LB, DL);
   Temp = StoreIRBuilder->CreateStore(LBVal, IV);
   Temp->setAlignment(DL.getTypeAllocSize(LBVal->getType()));
+
+  emitOMPInnerLoop(F, C, DL, IV, UB);
+}
+
+void PIRToOpenMPPass::emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout& DL,
+                                       Value *IV, Value *UB) {
+  auto CondBlock = BasicBlock::Create(C, "omp.inner.for.cond");
+  emitBlock(F, CondBlock);
+
+  auto ExitBlock = BasicBlock::Create(C, "omp.inner.for.end");
+  auto LoopBody = BasicBlock::Create(C, "omp.inner.for.body");
+  auto Continue = BasicBlock::Create(C, "omp.inner.for.inc");
+
+  emitForLoopCond(DL, IV, UB, LoopBody, ExitBlock);
+  emitBlock(F, LoopBody);
+  emitBlock(F, Continue);
+  emitForLoopInc(IV, DL);
+  emitBranch(CondBlock);
+  emitBlock(F, ExitBlock);
+}
+
+void PIRToOpenMPPass::emitForLoopCond(const DataLayout& DL, Value *IV, Value *UB, BasicBlock *Body,
+                                      BasicBlock *Exit) {
+  auto IVVal = emitAlignedLoad(IV, DL);
+  auto UBVal = emitAlignedLoad(UB, DL);
+  auto Cond = StoreIRBuilder->CreateICmpSLE(IVVal, UBVal);
+  Cond->setName("cmp");
+  StoreIRBuilder->CreateCondBr(Cond, Body, Exit);
+}
+
+void PIRToOpenMPPass::emitForLoopInc(Value *IV, const DataLayout& DL) {
+  auto IVVal = emitAlignedLoad(IV, DL);
+  auto Inc = StoreIRBuilder->CreateAdd(IVVal, StoreIRBuilder->getInt32(1), "", false, true);
+  Inc->setName("inc");
+  emitAlignedStore(Inc, IV, DL);
+}
+
+Value *PIRToOpenMPPass::emitAlignedLoad(Value *Addr, const DataLayout& DL) {
+  auto *Val = StoreIRBuilder->CreateLoad(Addr);
+  Val->setAlignment(DL.getTypeAllocSize(Val->getType()));
+  return Val;
+}
+
+void PIRToOpenMPPass::emitAlignedStore(Value *Val, Value *Addr, const DataLayout& DL) {
+  auto *Temp = StoreIRBuilder->CreateStore(Val, Addr);
+  Temp->setAlignment(DL.getTypeAllocSize(Val->getType()));
+}
+
+// By the end of emitBlock the IRBuilder will be positioned at the start
+// BB
+void PIRToOpenMPPass::emitBlock(Function *F, BasicBlock *BB, bool IsFinished) {
+  auto *CurBB = StoreIRBuilder->GetInsertBlock();
+  emitBranch(BB);
+
+  if (IsFinished && BB->use_empty()) {
+    delete BB;
+    return;
+  }
+
+  if (CurBB && CurBB->getParent())
+    F->getBasicBlockList().insertAfter(CurBB->getIterator(), BB);
+  else
+    F->getBasicBlockList().push_back(BB);
+  StoreIRBuilder->SetInsertPoint(BB);
+}
+
+void PIRToOpenMPPass::emitBranch(BasicBlock *Target) {
+  auto *CurBB = StoreIRBuilder->GetInsertBlock();
+
+  if (!CurBB || CurBB->getTerminator()) {
+    
+  } else {
+    StoreIRBuilder->CreateBr(Target);
+  }
+
+  StoreIRBuilder->ClearInsertionPoint();
 }
 
 AllocaInst *PIRToOpenMPPass::createSectionVal(Type *Ty, const Twine &Name,
