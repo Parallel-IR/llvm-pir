@@ -89,13 +89,21 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
                                                  Module *M) {
   Constant *RTLFn = nullptr;
   switch(Function) {
-  case OMPRTL__kmpc_fork_call:
+  case OMPRTL__kmpc_fork_call: {
     Type *TypeParams[] = {getIdentTyPointerTy(), Type::getInt32Ty(M->getContext()),
                           getKmpc_MicroPointerTy(M->getContext())};
     FunctionType *FnTy = FunctionType::get(Type::getVoidTy(M->getContext()), TypeParams,
                                            true);
     RTLFn = M->getOrInsertFunction("__kmpc_fork_call", FnTy);
     break;
+  }
+  case OMPRTL__kmpc_for_static_fini: {
+    Type *TypeParams[] = {getIdentTyPointerTy(), Type::getInt32Ty(M->getContext())};
+    llvm::FunctionType *FnTy =
+      llvm::FunctionType::get(Type::getVoidTy(M->getContext()), TypeParams, /*isVarArg*/ false);
+    RTLFn = M->getOrInsertFunction("__kmpc_for_static_fini", FnTy);
+    break;
+    }
   }
   return RTLFn;
 }
@@ -143,6 +151,11 @@ CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
   return call;
 }
 
+void PIRToOpenMPPass::emitForStaticFinish(Function *F, const DataLayout &DL) {
+  llvm::Value *Args[] = {getOrCreateDefaultLocation(F->getParent()), getThreadID(F, DL)};
+  emitRuntimeCall(createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_for_static_fini, F->getParent()),
+                  Args, "");
+}
 Function* PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR,
                                             bool IsForked) const {
   auto &F = *PR.getFork().getParent()->getParent();
@@ -264,7 +277,6 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   // BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
   // ReturnInst::Create(M.getContext(), PRFuncExitBB);
   StoreIRBuilder->CreateRetVoid();
-  RFunction->dump();
 
   AllocaInsertPt->eraseFromParent();
   delete AllocaIRBuilder;
@@ -326,6 +338,7 @@ void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C, const DataLayout
   emitAlignedStore(LBVal, IV, DL);
 
   emitOMPInnerLoop(F, C, DL, IV, UB, BodyGen);
+  emitForStaticFinish(F, DL);
 }
 
 void PIRToOpenMPPass::emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout& DL,

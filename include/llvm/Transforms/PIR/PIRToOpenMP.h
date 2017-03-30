@@ -10,6 +10,7 @@
 namespace llvm {
   enum OpenMPRuntimeFunction {
     OMPRTL__kmpc_fork_call,
+    OMPRTL__kmpc_for_static_fini,
   };
 
   enum OpenMPSchedType {
@@ -58,6 +59,7 @@ namespace llvm {
     CallInst *emitRuntimeCall(Value *Callee,
                                                ArrayRef<Value*> Args,
                                                const Twine &Name) const;
+    void emitForStaticFinish(Function *F, const DataLayout &DL);
     Function* emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
     void emitRegionFunction(const ParallelRegion &PR);
     void emitImplicitArgs(BasicBlock* PRFuncEntryBB);
