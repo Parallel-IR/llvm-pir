@@ -32,37 +32,59 @@ public:
   void dump() const;
 
 private:
+  /// Emits the outlined function corresponding to the parallel region.
   void emitRegionFunction(const ParallelRegion &PR);
+  /// Emits the outlined function corresponding to the parallel task (whehter
+  /// forked or continuation).
   Function *emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
 
+  /// Emits declaration of some OMP runtime functions.
   Constant *createRuntimeFunction(OpenMPRuntimeFunction Function, Module *M);
+  /// Emits calls to some OMP runtime functions.
   CallInst *emitRuntimeCall(Value *Callee, ArrayRef<Value *> Args,
                             const Twine &Name, BasicBlock *Parent) const;
+  /// Emits calls to some OMP runtime functions.
   CallInst *emitRuntimeCall(Value *Callee, ArrayRef<Value *> Args,
                             const Twine &Name) const;
 
+  /// Emits the implicit args needed for an outlined OMP region function.
   void emitImplicitArgs(BasicBlock *PRFuncEntryBB);
 
+  /// Emits code needed to express the semantics of a sections construct
   void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
                     Function *ForkedFn, Function *ContFn);
+  /// Emits code for variables needed by the sections loop.
   AllocaInst *createSectionVal(Type *Ty, const Twine &Name,
                                const DataLayout &DL, Value *Init = nullptr);
 
+  /// Emits declaration code for OMP __kmpc_for_static_init.
   Constant *createForStaticInitFunction(Module *M, unsigned IVSize,
                                         bool IVSigned);
+  /// Emits the cond code for the sections construct loop.
   void emitForLoopCond(const DataLayout &DL, Value *IV, Value *UB,
                        BasicBlock *Body, BasicBlock *Exit);
+  /// Manages the code emition for all parts of the sections loop.
   void emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout &DL,
                         Value *IV, Value *UB,
                         const function_ref<void()> &BodyGen);
+  /// Emits code for loop increment logic.
   void emitForLoopInc(Value *IV, const DataLayout &DL);
+  /// Calls the __kmpc_for_static_fini runtime function to tell it that
+  /// the parallel loop is done.
   void emitForStaticFinish(Function *F, const DataLayout &DL);
 
+  /// A helper to emit a basic block and transform the builder insertion
+  /// point to its start.
   void emitBlock(Function *F, BasicBlock *BB, bool IsFinished = false);
+  /// A helper to emit a branch to a BB.
   void emitBranch(BasicBlock *Target);
+  /// Creates an aligned load.
   Value *emitAlignedLoad(Value *Addr, const DataLayout &DL);
+  /// Creates an aligned store.
   void emitAlignedStore(Value *Val, Value *Addr, const DataLayout &DL);
 
+  /// Emits code to load the value of the thread ID variable of a parallel
+  /// thread.
   Value *getThreadID(Function *F, const DataLayout &DL);
 
   Type *getOrCreateIdentTy(Module *M);
