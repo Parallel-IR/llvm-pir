@@ -182,6 +182,72 @@ void ParallelRegion::addParallelSubRegion(ParallelRegion &ParallelSubRegion) {
   ParallelSubRegions[&ParallelSubRegion.getFork()] = &ParallelSubRegion;
 }
 
+bool ParallelRegion::isParallelLoopRegion(const Loop &L,
+                                          const DominatorTree &DT) const {
+  // Bail if the fork is not part of the loop.
+  if (!L.contains(getFork().getParent()))
+    return false;
+
+  // Bail if a join is part of the loop.
+  const auto &JoinsVector = ContinuationTask.getHaltsOrJoints();
+  if (std::any_of(JoinsVector.begin(), JoinsVector.end(),
+                  [&L](TerminatorInst *TI) { return L.contains(TI); }))
+    return false;
+
+  // Now check for possible side effects outside the forked task. First the
+  // header to the fork and then the part of the continuation which is inside
+  // the loop.
+  SmallVector<BasicBlock *, 8> Worklist;
+  BasicBlock *HeaderBB = L.getHeader();
+  Worklist.push_back(HeaderBB);
+
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+    assert(L.contains(BB));
+
+    for (Instruction &I : *BB)
+      if (I.mayHaveSideEffects())
+        return false;
+
+    if (&getFork() == BB->getTerminator())
+      continue;
+
+    for (BasicBlock *SuccessorBB : successors(BB))
+      if (L.contains(SuccessorBB))
+        Worklist.push_back(SuccessorBB);
+  }
+
+  BasicBlock &ContinuationEntryBB = ContinuationTask.getEntry();
+  assert(L.contains(&ContinuationEntryBB) &&
+         "Fork instructions should not be used to exit a loop!");
+
+  // We do not support nested loops in the continuation part.
+  if (std::any_of(L.begin(), L.end(), [&](Loop *SubLoop) {
+        return ContinuationTask.contains(SubLoop, DT);
+      }))
+    return false;
+
+  // Traverse all blocks that are in the continuation and in the loop and check
+  // for side-effects.
+  assert(Worklist.empty());
+  Worklist.push_back(&ContinuationEntryBB);
+
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+    assert(L.contains(BB));
+
+    for (Instruction &I : *BB)
+      if (I.mayHaveSideEffects())
+        return false;
+
+    for (BasicBlock *SuccessorBB : successors(BB))
+      if (L.contains(SuccessorBB) && SuccessorBB != HeaderBB)
+        Worklist.push_back(SuccessorBB);
+  }
+
+  return true;
+}
+
 bool ParallelRegion::contains(const BasicBlock *BB,
                               const DominatorTree &DT) const {
   // All contained blocks are dominated by the fork block.
@@ -430,6 +496,47 @@ ParallelRegionInfo::createMapping() const {
   return BB2PTMap;
 }
 
+ParallelRegion *ParallelRegionInfo::getParallelLoopRegion(const Loop &L,
+                                        const DominatorTree &DT) const {
+  if (empty())
+    return nullptr;
+
+  SmallVector<ParallelRegion *, 8> ParallelRegions;
+  ParallelRegions.append(begin(), end());
+
+  // The parallel region we are looking for.
+  ParallelRegion *ParallelLoopRegion = nullptr;
+
+  while (!ParallelRegions.empty()) {
+    ParallelRegion *PR = ParallelRegions.pop_back_val();
+
+    for (const auto &It : PR->getSubRegions())
+      ParallelRegions.push_back(It.getSecond());
+
+    if (!PR->isParallelLoopRegion(L, DT))
+      continue;
+
+    assert(!ParallelLoopRegion &&
+           "Broken nesting resulted in multiple parallel loop regions");
+
+    ParallelLoopRegion = PR;
+
+#ifdef NDEBUG
+    // For debug builds we verify that at most one parallel loop region exists,
+    // otherwise we just assume the nesting was intact.
+    break;
+#endif
+  }
+
+  return ParallelLoopRegion;
+}
+
+bool ParallelRegionInfo::isParallelLoop(const Loop &L,
+                                        const DominatorTree &DT) const {
+  // See ParallelRegionInfo::getParallelLoopRegion(...) for more information.
+  return getParallelLoopRegion(L, DT) != nullptr;
+}
+
 bool ParallelRegionInfo::containedInAny(const BasicBlock *BB,
                                         const DominatorTree &DT) const {
   return std::any_of(
@@ -468,7 +575,7 @@ bool ParallelRegionInfo::maybeContainedInAny(const Loop *L,
 
 bool ParallelRegionInfo::isSafeToPromote(const AllocaInst &AI,
                                          const DominatorTree &DT) const {
-  if (TopLevelParallelRegions.empty())
+  if (empty())
     return true;
 
   // First check if we know that AI is contained in a parallel region.

@@ -45,9 +45,20 @@ class ParallelRegion;
 /// @TODO The update interface to add/remove parallel regions is missing.
 ///
 class ParallelRegionInfo {
+public:
+  /// The container type used to store top level parallel regions.
+  using ParallelRegionVectorTy = SmallVector<ParallelRegion *, 4>;
 
+  /// Iterator types for top level parallel regions.
+  ///
+  ///{
+  using iterator = ParallelRegionVectorTy::iterator;
+  using const_iterator = ParallelRegionVectorTy::const_iterator;
+  ///}
+
+private:
   /// The parallel regions that are not nested in other parallel regions.
-  SmallVector<ParallelRegion *, 4> TopLevelParallelRegions;
+  ParallelRegionVectorTy TopLevelParallelRegions;
 
 public:
   ParallelRegionInfo() {}
@@ -71,13 +82,56 @@ public:
   /// Return the top-level parallel regions in this function.
   ///
   ///{
-  SmallVectorImpl<ParallelRegion *> &getTopLevelParallelRegions() {
+  ParallelRegionVectorTy &getTopLevelParallelRegions() {
     return TopLevelParallelRegions;
   }
-  const SmallVectorImpl<ParallelRegion *> &getTopLevelParallelRegions() const {
+  const ParallelRegionVectorTy &getTopLevelParallelRegions() const {
     return TopLevelParallelRegions;
   }
   ///}
+
+  /// Return true if there is no parallel region in this function.
+  bool empty() const { return TopLevelParallelRegions.empty(); }
+
+  /// Remove all cached parallel regions of this function.
+  void clear() { TopLevelParallelRegions.clear(); }
+
+  /// Return the number of top level parallel regions in this function.
+  ParallelRegionVectorTy::size_type size() const {
+    return TopLevelParallelRegions.size();
+  }
+
+  /// Iterators for parallel regions.
+  ///
+  ///{
+  iterator begin() { return TopLevelParallelRegions.begin(); }
+  iterator end() { return TopLevelParallelRegions.end(); }
+  const_iterator begin() const { return TopLevelParallelRegions.begin(); }
+  const_iterator end() const { return TopLevelParallelRegions.end(); }
+  ///}
+
+  /// Return the parallel region that makes @p L a parallel loop, if any.
+  ///
+  /// A parallel loop is a loop that does fork (parts of) its body to a new
+  /// task which are joined only after the loop. It is also ensured that
+  /// everything that is not forked but part of the loop does not cause
+  /// side-effects. These instructions usually compute the exit condition
+  /// and the new values for the induction variable(s).
+  ///
+  /// Note: We allow multiple induction variables and complex exit conditions
+  /// here. However, for some parallel runtimes these have to be simplified,
+  /// e.g. expressed with regards to one canonical induction variable.
+  /// TODO: Provide an interface to perform the simplification.
+  ///
+  /// Note: We allow arbitrary code after the loop but before a join
+  /// instruction.
+  ParallelRegion *getParallelLoopRegion(const Loop &L,
+                                        const DominatorTree &DT) const;
+
+  /// Return true if @p L is a parallel loop.
+  ///
+  /// See ParallelRegionInfo::getParallelLoopRegion for more information.
+  bool isParallelLoop(const Loop &L, const DominatorTree &DT) const;
 
   /// Check for containment in any parallel region.
   ///{
@@ -307,6 +361,11 @@ public:
            ContinuationTask.visit(Visitor, Recursive);
   }
   ///}
+
+  /// Return true if this is a parallel loop region for @p L.
+  ///
+  /// See ParallelRegionInfo::getParallelLoopRegion for more information.
+  bool isParallelLoopRegion(const Loop &L, const DominatorTree &DT) const;
 
   /// @see ParallelTask::contains(const BasicBlock *BB, DominatorTree &DT)
   bool contains(const BasicBlock *BB, const DominatorTree &DT) const;
