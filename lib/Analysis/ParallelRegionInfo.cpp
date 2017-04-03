@@ -362,8 +362,12 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
     if (ContainsParallelTI)
       break;
   }
-  if (!ContainsParallelTI)
+
+  if (!ContainsParallelTI) {
+    F.addFnAttr(Attribute::NoPIR);
+
     return BB2PTMap;
+  }
 
   // We use reverse post order (RPO) here only for verification purposes. A
   // simple CFG traversal would do just fine if the parallel IR is well-formed
@@ -471,6 +475,9 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
       OldTask = PT;
     }
   }
+
+  if (BB2PTMap.empty())
+    F.addFnAttr(Attribute::NoPIR);
 
   return BB2PTMap;
 }

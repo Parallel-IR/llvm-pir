@@ -1359,6 +1359,7 @@ void Verifier::verifyAttributeTypes(AttributeSet Attrs, unsigned Idx,
         I->getKindAsEnum() == Attribute::Convergent ||
         I->getKindAsEnum() == Attribute::ArgMemOnly ||
         I->getKindAsEnum() == Attribute::NoRecurse ||
+        I->getKindAsEnum() == Attribute::NoPIR ||
         I->getKindAsEnum() == Attribute::InaccessibleMemOnly ||
         I->getKindAsEnum() == Attribute::InaccessibleMemOrArgMemOnly ||
         I->getKindAsEnum() == Attribute::AllocSize) {

@@ -154,7 +154,7 @@
 ; CHECK-O-NEXT: Running pass: PrintModulePass
 ;
 ; Make sure we get the IR back out without changes when we print the module.
-; CHECK-O-LABEL: define void @foo(i32 %n) local_unnamed_addr {
+; CHECK-O-LABEL: define void @foo(i32 %n) local_unnamed_addr #0 {
 ; CHECK-O-NEXT: entry:
 ; CHECK-O-NEXT:   br label %loop
 ; CHECK-O:      loop:
@@ -167,11 +167,13 @@
 ; CHECK-O-NEXT:   ret void
 ; CHECK-O-NEXT: }
 ;
+; CHECK-O:      attributes #0 = { nopir }
+;
 ; CHECK-O-NEXT: Finished llvm::Module pass manager run.
 
 declare void @bar() local_unnamed_addr
 
-define void @foo(i32 %n) local_unnamed_addr {
+define void @foo(i32 %n) local_unnamed_addr #0 {
 entry:
   br label %loop
 loop:
@@ -183,3 +185,5 @@ loop:
 exit:
   ret void
 }
+
+attributes #0 = { nopir }
