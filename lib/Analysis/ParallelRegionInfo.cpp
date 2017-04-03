@@ -347,7 +347,7 @@ void ParallelRegionInfo::releaseMemory() {
 }
 
 ParallelRegionInfo::ParallelTaskMappingTy
-ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
+ParallelRegionInfo::recalculate(Function &F, const DominatorTree *DT) {
   releaseMemory();
 
   // A mapping from blocks to the parallel tasks they are contained in.
@@ -421,9 +421,9 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
       assert(PT->isForkedTask() &&
              "Found halt instruction in continuation task!");
       ParallelRegion &PR = PT->getParentRegion();
-      assert(DT.dominates(PR.getFork().getParent(), BB) &&
+      assert((!DT || DT->dominates(PR.getFork().getParent(), BB)) &&
              "Parallel region fork does not dominate halt instruction!");
-      assert(DT.dominates(&PT->getEntry(), BB) &&
+      assert((!DT || DT->dominates(&PT->getEntry(), BB)) &&
              "Forked task entry does not dominate halt instruction!");
       assert(PR.getFork().getContinuationBB() == Halt->getContinuationBB() &&
              "Halt successor was not the continuation block!");
@@ -443,9 +443,9 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
       assert(PT->isContinuationTask() &&
              "Found join instruction in forked task!");
       ParallelRegion &PR = PT->getParentRegion();
-      assert(DT.dominates(PR.getFork().getParent(), BB) &&
+      assert((!DT || DT->dominates(PR.getFork().getParent(), BB)) &&
              "Parallel region fork does not dominate join instruction!");
-      assert(DT.dominates(&PT->getEntry(), BB) &&
+      assert((!DT || DT->dominates(&PT->getEntry(), BB)) &&
              "Continuation task entry does not dominate join instruction!");
       PT->addHaltOrJoin(*Join);
       PT = PR.getParentTask();
@@ -670,7 +670,7 @@ AnalysisKey ParallelRegionAnalysis::Key;
 ParallelRegionInfo ParallelRegionAnalysis::run(Function &F,
                                                FunctionAnalysisManager &AM) {
   DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
-  return ParallelRegionInfo(F, DT);
+  return ParallelRegionInfo(F, &DT);
 }
 
 //===----------------------------------------------------------------------===//
@@ -679,7 +679,7 @@ ParallelRegionInfo ParallelRegionAnalysis::run(Function &F,
 
 bool ParallelRegionInfoPass::runOnFunction(Function &F) {
   auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-  PRI.recalculate(F, DT);
+  PRI.recalculate(F, &DT);
   return false;
 }
 

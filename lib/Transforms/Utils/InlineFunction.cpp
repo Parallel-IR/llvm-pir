@@ -26,6 +26,7 @@
 #include "llvm/Analysis/EHPersonalities.h"
 #include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/ParallelRegionInfo.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/CFG.h"
@@ -1445,6 +1446,20 @@ static void updateCalleeCount(BlockFrequencyInfo &CallerBFI, BasicBlock *CallBB,
     Callee->setEntryCount(CalleeCount.getValue() - CallSiteCount.getValue());
 }
 
+static BasicBlock::iterator getAllocaInsertionPointInCaller(
+    BasicBlock *CallBB,
+    ParallelRegionInfo::ParallelTaskMappingTy &ParallelTaskMapping) {
+
+  Function *Caller = CallBB->getParent();
+  if (Caller->hasFnAttribute(Attribute::NoPIR))
+    return Caller->begin()->begin();
+
+  const ParallelTask *PT = ParallelTaskMapping.lookup(CallBB);
+  if (PT)
+    return PT->getEntry().begin();
+  return Caller->begin()->begin();
+}
+
 /// This function inlines the called function into the basic block of the
 /// caller. This returns false if it is not possible to inline this call.
 /// The program is still in a well defined state if this occurs though.
@@ -1729,12 +1744,28 @@ bool llvm::InlineFunction(CallSite CS, InlineFunctionInfo &IFI,
         }
   }
 
+  //Compute the parallel region info of the caller if needed. This can happen
+  // if either the caller or the callee might contain parallel IR (PIR). If the
+  // caller contains PIR we need to restrict the movement of alloca
+  // instructions. If the callee contains PIR we might need to update the
+  // function attribute of the caller.
+  ParallelRegionInfo PIR;
+  ParallelRegionInfo::ParallelTaskMappingTy ParallelTaskMapping;
+
+  if (!Caller->hasFnAttribute(Attribute::NoPIR))
+    ParallelTaskMapping = PIR.recalculate(*Caller, nullptr);
+
+  if (!CalledFunc->hasFnAttribute(Attribute::NoPIR))
+    Caller->removeFnAttr(Attribute::NoPIR);
+
   // If there are any alloca instructions in the block that used to be the entry
   // block for the callee, move them to the entry block of the caller.  First
   // calculate which instruction they should be inserted before.  We insert the
-  // instructions at the end of the current alloca list.
+  // instructions at the end of the current alloca list. However, make sure not
+  // to hoist alloca Instructions out of a parallel region.
   {
-    BasicBlock::iterator InsertPoint = Caller->begin()->begin();
+    BasicBlock::iterator InsertPoint =
+        getAllocaInsertionPointInCaller(OrigBB, ParallelTaskMapping);
     for (BasicBlock::iterator I = FirstNewBlock->begin(),
          E = FirstNewBlock->end(); I != E; ) {
       AllocaInst *AI = dyn_cast<AllocaInst>(I++);
@@ -1764,7 +1795,7 @@ bool llvm::InlineFunction(CallSite CS, InlineFunctionInfo &IFI,
       // Transfer all of the allocas over in a block.  Using splice means
       // that the instructions aren't removed from the symbol table, then
       // reinserted.
-      Caller->getEntryBlock().getInstList().splice(
+      InsertPoint->getParent()->getInstList().splice(
           InsertPoint, FirstNewBlock->getInstList(), AI->getIterator(), I);
     }
     // Move any dbg.declares describing the allocas into the entry basic block.

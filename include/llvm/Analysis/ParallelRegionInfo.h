@@ -62,7 +62,9 @@ private:
 
 public:
   ParallelRegionInfo() {}
-  ParallelRegionInfo(Function &F, const DominatorTree &DT) { recalculate(F, DT); }
+  ParallelRegionInfo(Function &F, const DominatorTree *DT = nullptr) {
+    recalculate(F, DT);
+  }
   ~ParallelRegionInfo() { releaseMemory(); }
 
   /// Type for the mapping of basic blocks to parallel tasks.
@@ -77,7 +79,8 @@ public:
   /// on-demand computation of this mapping use the createMapping() function.
   ///
   /// @returns A mapping from basic blocks to the surrounding parallel task.
-  ParallelTaskMappingTy recalculate(Function &F, const DominatorTree &DT);
+  ParallelTaskMappingTy recalculate(Function &F,
+                                    const DominatorTree *DT = nullptr);
 
   /// Return the top-level parallel regions in this function.
   ///
