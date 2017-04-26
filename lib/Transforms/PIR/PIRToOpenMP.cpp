@@ -2,6 +2,11 @@
 // TODO the way I traverse the regions now results in every one being
 // an top-level region. Modify that to traverse in reverse order instead.
 // But first make it work for simple regions.
+
+// TODO study the desing of clang's CodeGenFunction for a better generalized
+// handling of function code generation logic. For now, things are written in an
+// ad-hoc manner based on what is required for our specific case.
+
 using namespace llvm;
 
 bool PIRToOpenMPPass::runOnFunction(Function &F) {
@@ -106,7 +111,8 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 
   if (PR.isTopLevelRegion()) {
     emitImplicitArgs(PRFuncEntryBB);
-    emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
+    // emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
+    emitMasterRegion(RFunction, DL);
   }
   // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   // CallInst::Create(ContFunction, "", PRFuncEntryBB);
@@ -175,9 +181,25 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
   case OMPRTL__kmpc_for_static_fini: {
     Type *TypeParams[] = {getIdentTyPointerTy(),
                           Type::getInt32Ty(M->getContext())};
-    llvm::FunctionType *FnTy = llvm::FunctionType::get(
-        Type::getVoidTy(M->getContext()), TypeParams, /*isVarArg*/ false);
+    FunctionType *FnTy = FunctionType::get(Type::getVoidTy(M->getContext()),
+                                           TypeParams, /*isVarArg*/ false);
     RTLFn = M->getOrInsertFunction("__kmpc_for_static_fini", FnTy);
+    break;
+  }
+  case OMPRTL__kmpc_master: {
+    Type *TypeParams[] = {getIdentTyPointerTy(),
+                          Type::getInt32Ty(M->getContext())};
+    FunctionType *FnTy = FunctionType::get(Type::getInt32Ty(M->getContext()),
+                                           TypeParams, /*isVarArg=*/false);
+    RTLFn = M->getOrInsertFunction("__kmpc_master", FnTy);
+    break;
+  }
+  case OMPRTL__kmpc_end_master: {
+    Type *TypeParams[] = {getIdentTyPointerTy(),
+                          Type::getInt32Ty(M->getContext())};
+    FunctionType *FnTy = FunctionType::get(Type::getVoidTy(M->getContext()),
+                                           TypeParams, /*isVarArg=*/false);
+    RTLFn = M->getOrInsertFunction("__kmpc_end_master", FnTy);
     break;
   }
   }
@@ -238,6 +260,158 @@ void PIRToOpenMPPass::emitImplicitArgs(BasicBlock *PRFuncEntryBB) {
   emitArgProlog(*ArgI, ".bound_tid.");
 }
 
+void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL) {
+  Module *M = F->getParent();
+  LLVMContext &C = F->getContext();
+  ArrayRef<Value *> Args = {DefaultOpenMPLocation, getThreadID(F, DL)};
+  auto MasterRTFn =
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_master, M);
+  auto IsMaster = emitRuntimeCall(MasterRTFn, Args, "");
+
+  BasicBlock *IfThenBB = BasicBlock::Create(C, "omp_if.then", F, nullptr);
+  BasicBlock *IfEndBB = BasicBlock::Create(C, "omp_if.end", F, nullptr);
+  auto Cond =
+      StoreIRBuilder->CreateICmpNE(IsMaster, StoreIRBuilder->getInt32(1));
+  StoreIRBuilder->CreateCondBr(Cond, IfThenBB, IfEndBB);
+
+  StoreIRBuilder->SetInsertPoint(IfThenBB);
+  auto EndMasterRTFn =
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_end_master, M);
+  emitRuntimeCall(EndMasterRTFn, Args, "");
+  emitBranch(IfEndBB);
+
+  emitTaskInit(M);
+}
+
+// Creates some data structures that are needed for the actual task work. It
+// then calls into emitProxyTaskFunction which starts  code generation for the
+// task
+void PIRToOpenMPPass::emitTaskInit(Module *M) {
+  LLVMContext &C = M->getContext();
+  auto *SharedsTy = StructType::create("anon", Type::getInt8Ty(C), nullptr);
+  auto *SharedsPtrTy = PointerType::getUnqual(SharedsTy);
+  emitKmpRoutineEntryT(M);
+  auto *KmpTaskTTy = createKmpTaskTTy(M, KmpRoutineEntryPtrTy);
+  auto *KmpTaskTWithPrivatesTy = createKmpTaskTWithPrivatesTy(KmpTaskTTy);
+  auto *KmpTaskTWithPrivatesPtrTy =
+      PointerType::getUnqual(KmpTaskTWithPrivatesTy);
+  auto OutlinedFn = emitTaskOutlinedFunction(M, SharedsPtrTy);
+  OutlinedFn->dump();
+  auto *TaskPrivatesMapTy = std::next(OutlinedFn->arg_begin(), 3)->getType();
+  // NOTE for future use
+  auto *TaskPrivatesMap =
+      ConstantPointerNull::get(cast<PointerType>(TaskPrivatesMapTy));
+
+  emitProxyTaskFunction(M, KmpTaskTWithPrivatesPtrTy, SharedsPtrTy, OutlinedFn,
+                        TaskPrivatesMap);
+}
+
+// Emits some boilerplate code to kick off the task work and then calls the
+// function that does the actual work.
+void PIRToOpenMPPass::emitProxyTaskFunction(Module *M,
+                                            Type *KmpTaskTWithPrivatesPtrTy,
+                                            Type *SharedsPtrTy,
+                                            Value *TaskFunction,
+                                            Value *TaskPrivatesMap) {
+  auto &C = M->getContext();
+  auto *Int32Ty = Type::getInt32Ty(C);
+  ArrayRef<Type *> ArgTys = {Int32Ty, KmpTaskTWithPrivatesPtrTy};
+  auto *TaskEntryTy = FunctionType::get(Int32Ty, ArgTys, false);
+  auto *TaskEntry = Function::Create(TaskEntryTy, GlobalValue::InternalLinkage,
+                                     ".omp_task_entry.", M);
+  DataLayout DL(M);
+  auto *EntryBB = BasicBlock::Create(C, "entry", TaskEntry, nullptr);
+
+  IRBuilder<> IRBuilder(EntryBB);
+  auto *RetValAddr = IRBuilder.CreateAlloca(Int32Ty, nullptr, "retval");
+  RetValAddr->setAlignment(DL.getTypeAllocSize(Int32Ty));
+
+  // TODO replace this with a call to startFunction
+  auto Args = TaskEntry->args();
+  std::vector<Value *> ArgAllocas(TaskEntry->arg_size());
+  auto ArgAllocaIt = ArgAllocas.begin();
+  for (auto &Arg : Args) {
+    auto *ArgAlloca = IRBuilder.CreateAlloca(Arg.getType(), nullptr, "addr");
+    ArgAlloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
+    *ArgAllocaIt = ArgAlloca;
+    ++ArgAllocaIt;
+  }
+
+  ArgAllocaIt = ArgAllocas.begin();
+  for (auto &Arg : Args) {
+    IRBuilder.CreateAlignedStore(&Arg, *ArgAllocaIt,
+                                 DL.getTypeAllocSize(Arg.getType()));
+    ++ArgAllocaIt;
+  }
+
+  auto GtidParam = IRBuilder.CreateAlignedLoad(ArgAllocas[0],
+                                               DL.getTypeAllocSize(ArgTys[0]));
+
+  auto TDVal = IRBuilder.CreateAlignedLoad(ArgAllocas[1],
+                                           DL.getTypeAllocSize(ArgTys[1]));
+  auto TaskTBase = IRBuilder.CreateInBoundsGEP(
+      TDVal, {IRBuilder.getInt32(0), IRBuilder.getInt32(0)});
+  auto PartIDAddr = IRBuilder.CreateInBoundsGEP(
+      TaskTBase, {IRBuilder.getInt32(0), IRBuilder.getInt32(2)});
+  auto *SharedsAddr = IRBuilder.CreateInBoundsGEP(
+      TaskTBase, {IRBuilder.getInt32(0), IRBuilder.getInt32(0)});
+  auto Shareds = IRBuilder.CreateAlignedLoad(
+      SharedsAddr,
+      DL.getTypeAllocSize(SharedsAddr->getType()->getPointerElementType()));
+  auto SharedsParam =
+      IRBuilder.CreatePointerBitCastOrAddrSpaceCast(Shareds, SharedsPtrTy);
+  auto TDParam = IRBuilder.CreatePointerBitCastOrAddrSpaceCast(
+      TDVal, Type::getInt8PtrTy(C));
+  auto PrivatesParam = ConstantPointerNull::get(Type::getInt8PtrTy(C));
+
+  Value *TaskParams[] = {GtidParam,       PartIDAddr, PrivatesParam,
+                         TaskPrivatesMap, TDParam,    SharedsParam};
+
+  IRBuilder.CreateCall(TaskFunction, TaskParams);
+  IRBuilder.CreateRet(IRBuilder.getInt32(0));
+  TaskEntry->dump();
+}
+
+Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
+                                                    Type *SharedsPtrTy) {
+  auto &C = M->getContext();
+  DataLayout DL(M);
+
+  auto *CopyFnTy =
+      FunctionType::get(Type::getVoidTy(C), {Type::getInt8PtrTy(C)}, true);
+  auto *CopyFnPtrTy = PointerType::getUnqual(CopyFnTy);
+
+  auto *OutlinedFn = (Function *)M->getOrInsertFunction(
+      ".omp_outlined.", Type::getVoidTy(C), Type::getInt32Ty(C),
+      Type::getInt32PtrTy(C), Type::getInt8PtrTy(C), CopyFnPtrTy,
+      Type::getInt8PtrTy(C), SharedsPtrTy, nullptr);
+  StringRef ArgNames[] = {".global_tid.", ".part_id.", ".privates.",
+                          ".copy_fn.",    ".task_t.",  "__context"};
+  int i = 0;
+  for (auto &Arg : OutlinedFn->args()) {
+    Arg.setName(ArgNames[i]);
+    ++i;
+  }
+
+  OutlinedFn->setLinkage(GlobalValue::InternalLinkage);
+  OutlinedFn->addFnAttr(Attribute::AlwaysInline);
+  OutlinedFn->addFnAttr(Attribute::NoUnwind);
+  OutlinedFn->addFnAttr(Attribute::UWTable);
+
+  auto ArgToAllocaMap = startFunction(OutlinedFn);
+  auto *ContextArg = &*std::prev(OutlinedFn->args().end());
+  auto It = ArgToAllocaMap.find(ContextArg);
+  assert(It != ArgToAllocaMap.end() && "Argument entry wasn't found");
+  auto *ContextAddr = It->second;
+  auto *EntryBB = &*OutlinedFn->begin();
+  IRBuilder<> IRBuilder(EntryBB->getTerminator());
+  IRBuilder.CreateAlignedLoad(
+      ContextAddr,
+      DL.getTypeAllocSize(ContextAddr->getType()->getPointerElementType()));
+
+  return OutlinedFn;
+}
+
 // NOTE check CodeGenFunction::EmitSections for more details
 void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C,
                                    const DataLayout &DL, Function *ForkedFn,
@@ -280,7 +454,8 @@ void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C,
   // implementation
   // , in case it is needed later, check emitForStaticInitCall in Clang
   llvm::Value *Args[] = {
-      getOrCreateDefaultLocation(F->getParent()), ThreadID,
+      getOrCreateDefaultLocation(F->getParent()),
+      ThreadID,
       ConstantInt::get(Int32Ty,
                        OpenMPSchedType::OMP_sch_static), // Schedule type
       IL,                                                // &isLastIter
@@ -325,7 +500,7 @@ Constant *PIRToOpenMPPass::createForStaticInitFunction(Module *M,
                            : (IVSigned ? "__kmpc_for_static_init_8"
                                        : "__kmpc_for_static_init_8u");
   auto ITy = IVSize == 32 ? Type::getInt32Ty(C) : Type::getInt64Ty(C);
-  auto PtrTy = llvm::PointerType::getUnqual(ITy);
+  auto PtrTy = PointerType::getUnqual(ITy);
   llvm::Type *TypeParams[] = {
       getIdentTyPointerTy(),                             // loc
       Type::getInt32Ty(C),                               // tid
@@ -404,7 +579,7 @@ void PIRToOpenMPPass::emitBlock(Function *F, BasicBlock *BB, bool IsFinished) {
     F->getBasicBlockList().insertAfter(CurBB->getIterator(), BB);
   else
     F->getBasicBlockList().push_back(BB);
-  StoreIRBuilder->SetInsertPoint(BB);
+  // StoreIRBuilder->SetInsertPoint(BB);
 }
 
 void PIRToOpenMPPass::emitBranch(BasicBlock *Target) {
@@ -416,7 +591,8 @@ void PIRToOpenMPPass::emitBranch(BasicBlock *Target) {
     StoreIRBuilder->CreateBr(Target);
   }
 
-  StoreIRBuilder->ClearInsertionPoint();
+  // StoreIRBuilder->ClearInsertionPoint();
+  StoreIRBuilder->SetInsertPoint(Target);
 }
 
 Value *PIRToOpenMPPass::emitAlignedLoad(Value *Addr, const DataLayout &DL) {
@@ -461,8 +637,6 @@ Value *PIRToOpenMPPass::getThreadID(Function *F, const DataLayout &DL) {
   return nullptr;
 }
 
-// TODO double check for best practices, look at others code
-
 Type *PIRToOpenMPPass::getOrCreateIdentTy(Module *M) {
   if (M->getTypeByName("ident_t") == nullptr) {
     IdentTy = StructType::create(
@@ -474,6 +648,81 @@ Type *PIRToOpenMPPass::getOrCreateIdentTy(Module *M) {
   }
 
   return IdentTy;
+}
+
+Type *
+PIRToOpenMPPass::createKmpTaskTTy(Module *M,
+                                  PointerType *KmpRoutineEntryPointerQTy) {
+  auto &C = M->getContext();
+  auto *KmpCmplrdataTy =
+      StructType::create("kmp_cmplrdata_t", KmpRoutineEntryPtrTy, nullptr);
+  auto *KmpTaskTTy = StructType::create(
+      "kmp_task_t", Type::getInt8PtrTy(C), KmpRoutineEntryPtrTy,
+      Type::getInt32Ty(C), KmpCmplrdataTy, KmpCmplrdataTy, nullptr);
+
+  return KmpTaskTTy;
+}
+
+Type *PIRToOpenMPPass::createKmpTaskTWithPrivatesTy(Type *KmpTaskTTy) {
+  auto *KmpTaskTWithPrivatesTy =
+      StructType::create("kmp_task_t_with_privates", KmpTaskTTy, nullptr);
+  return KmpTaskTWithPrivatesTy;
+}
+
+void PIRToOpenMPPass::emitKmpRoutineEntryT(Module *M) {
+  if (!KmpRoutineEntryPtrTy) {
+    // Build typedef kmp_int32 (* kmp_routine_entry_t)(kmp_int32, void *); type.
+    auto &C = M->getContext();
+    auto *Int32Ty = Type::getInt32Ty(C);
+    ArrayRef<Type *> KmpRoutineEntryTyArgs = {Int32Ty, Type::getInt8PtrTy(C)};
+    KmpRoutineEntryPtrTy = PointerType::getUnqual(
+        FunctionType::get(Int32Ty, KmpRoutineEntryTyArgs, false));
+  }
+}
+
+DenseMap<Argument *, Value *> PIRToOpenMPPass::startFunction(Function *Fn) {
+  auto *M = Fn->getParent();
+  auto &C = M->getContext();
+  DataLayout DL(M);
+  DenseMap<Argument *, Value *> ArgToAllocaMap;
+  auto *EntryBB = BasicBlock::Create(C, "entry", Fn, nullptr);
+  IRBuilder<> IRBuilder(EntryBB);
+  auto *RetTy = Fn->getReturnType();
+  AllocaInst *RetValAddr = nullptr;
+  if (!RetTy->isVoidTy()) {
+    RetValAddr = IRBuilder.CreateAlloca(RetTy, nullptr, "retval");
+    RetValAddr->setAlignment(DL.getTypeAllocSize(RetTy));
+  }
+
+  auto Args = Fn->args();
+  std::vector<Value *> ArgAllocas(Fn->arg_size());
+  auto ArgAllocaIt = ArgAllocas.begin();
+  for (auto &Arg : Args) {
+    auto *ArgAlloca =
+        IRBuilder.CreateAlloca(Arg.getType(), nullptr, Arg.getName() + ".addr");
+    ArgAlloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
+    *ArgAllocaIt = ArgAlloca;
+    auto &ArgToAllocaIt = ArgToAllocaMap.FindAndConstruct(&Arg);
+    ArgToAllocaIt.second = ArgAlloca;
+    ++ArgAllocaIt;
+  }
+
+  ArgAllocaIt = ArgAllocas.begin();
+  for (auto &Arg : Args) {
+    IRBuilder.CreateAlignedStore(&Arg, *ArgAllocaIt,
+                                 DL.getTypeAllocSize(Arg.getType()));
+    ++ArgAllocaIt;
+  }
+
+  if (RetTy->isVoidTy()) {
+    IRBuilder.CreateRetVoid();
+  } else {
+    auto *RetVal =
+        IRBuilder.CreateAlignedLoad(RetValAddr, DL.getTypeAllocSize(RetTy));
+    IRBuilder.CreateRet(RetVal);
+  }
+
+  return ArgToAllocaMap;
 }
 
 PointerType *PIRToOpenMPPass::getIdentTyPointerTy() const {
@@ -553,4 +802,4 @@ INITIALIZE_PASS_END(PIRToOpenMPPass, "pir2omp", "Lower PIR to OpenMP", true,
 
 namespace llvm {
 FunctionPass *createPIRToOpenMPPass() { return new PIRToOpenMPPass(); }
-}
+} // namespace llvm

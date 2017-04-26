@@ -11,6 +11,8 @@ namespace llvm {
 enum OpenMPRuntimeFunction {
   OMPRTL__kmpc_fork_call,
   OMPRTL__kmpc_for_static_fini,
+  OMPRTL__kmpc_master,
+  OMPRTL__kmpc_end_master,
 };
 
 enum OpenMPSchedType {
@@ -50,6 +52,13 @@ private:
   /// Emits the implicit args needed for an outlined OMP region function.
   void emitImplicitArgs(BasicBlock *PRFuncEntryBB);
 
+  void emitMasterRegion(Function *F, const DataLayout &DL);
+
+  void emitTaskInit(Module *M);
+  void emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
+                             Type *SharedsPtrTy, Value *TaskFunction,
+                             Value *TaskPrivatesMap);
+  Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy);
   /// Emits code needed to express the semantics of a sections construct
   void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
                     Function *ForkedFn, Function *ContFn);
@@ -94,6 +103,12 @@ private:
   FunctionType *getOrCreateKmpc_MicroTy(LLVMContext &Context);
   PointerType *getKmpc_MicroPointerTy(LLVMContext &Context);
 
+  Type *createKmpTaskTTy(Module *M, PointerType *KmpRoutineEntryPointerQTy);
+  Type *createKmpTaskTWithPrivatesTy(Type *KmpTaskTTy);
+  void emitKmpRoutineEntryT(Module *M);
+
+  DenseMap<Argument *, Value *> startFunction(Function *Fn);
+
 private:
   ParallelRegionInfo *PRI;
 
@@ -101,6 +116,7 @@ private:
   FunctionType *Kmpc_MicroTy;
   Constant *DefaultOpenMPPSource;
   Constant *DefaultOpenMPLocation;
+  PointerType *KmpRoutineEntryPtrTy;
   // Maps a funtion representing an outlined top-level region to the alloca
   // instruction of its thread id.
   typedef DenseMap<Function *, Value *> OpenMPThreadIDAllocaMapTy;
@@ -121,6 +137,6 @@ class PIRToOMPPass : public PassInfoMixin<PIRToOMPPass> {
 
   void run(Function &F, FunctionAnalysisManager &AM);
 };
-}
+} // namespace llvm
 
 #endif
