@@ -112,7 +112,7 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   if (PR.isTopLevelRegion()) {
     emitImplicitArgs(PRFuncEntryBB);
     // emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
-    emitMasterRegion(RFunction, DL);
+    emitMasterRegion(RFunction, DL, ForkedFunction, ContFunction);
   }
   // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
   // CallInst::Create(ContFunction, "", PRFuncEntryBB);
@@ -284,7 +284,8 @@ void PIRToOpenMPPass::emitImplicitArgs(BasicBlock *PRFuncEntryBB) {
   emitArgProlog(*ArgI, ".bound_tid.");
 }
 
-void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL) {
+void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL,
+                                       Function *ForkedFn, Function *ContFn) {
   Module *M = F->getParent();
   LLVMContext &C = F->getContext();
   ArrayRef<Value *> MasterArgs = {DefaultOpenMPLocation, getThreadID(F, DL)};
@@ -295,17 +296,19 @@ void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL) {
   BasicBlock *IfThenBB = BasicBlock::Create(C, "omp_if.then", F, nullptr);
   BasicBlock *IfEndBB = BasicBlock::Create(C, "omp_if.end", F, nullptr);
   auto Cond =
-      StoreIRBuilder->CreateICmpNE(IsMaster, StoreIRBuilder->getInt32(1));
+      StoreIRBuilder->CreateICmpNE(IsMaster, StoreIRBuilder->getInt32(0));
   StoreIRBuilder->CreateCondBr(Cond, IfThenBB, IfEndBB);
 
   StoreIRBuilder->SetInsertPoint(IfThenBB);
 
-  auto *NewTask = emitTaskInit(M, F, *StoreIRBuilder, DL);
+  auto *NewTask = emitTaskInit(M, F, *StoreIRBuilder, DL, ForkedFn);
   ArrayRef<Value *> TaskArgs = {DefaultOpenMPLocation, getThreadID(F, DL),
                                 NewTask};
   emitRuntimeCall(
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task, M),
       TaskArgs, "", *StoreIRBuilder);
+
+  StoreIRBuilder->CreateCall(ContFn);
 
   auto EndMasterRTFn =
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_end_master, M);
@@ -318,7 +321,8 @@ void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL) {
 // task
 Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
                                      IRBuilder<> &CallerIRBuilder,
-                                     const DataLayout &DL) {
+                                     const DataLayout &DL,
+                                     Function *ForkedFn) {
   LLVMContext &C = M->getContext();
   auto *SharedsTy = StructType::create("anon", Type::getInt8Ty(C), nullptr);
   auto *SharedsPtrTy = PointerType::getUnqual(SharedsTy);
@@ -331,7 +335,7 @@ Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
       PointerType::getUnqual(KmpTaskTWithPrivatesTy);
   auto *KmpTaskTWithPrivatesTySize =
       CallerIRBuilder.getInt64(DL.getTypeAllocSize(KmpTaskTWithPrivatesTy));
-  auto OutlinedFn = emitTaskOutlinedFunction(M, SharedsPtrTy);
+  auto OutlinedFn = emitTaskOutlinedFunction(M, SharedsPtrTy, ForkedFn);
   auto *TaskPrivatesMapTy = std::next(OutlinedFn->arg_begin(), 3)->getType();
   // NOTE for future use
   auto *TaskPrivatesMap =
@@ -425,7 +429,8 @@ Function *PIRToOpenMPPass::emitProxyTaskFunction(
 }
 
 Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
-                                                    Type *SharedsPtrTy) {
+                                                    Type *SharedsPtrTy,
+                                                    Function *ForkedFn) {
   auto &C = M->getContext();
   DataLayout DL(M);
 
@@ -460,6 +465,7 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
   IRBuilder.CreateAlignedLoad(
       ContextAddr,
       DL.getTypeAllocSize(ContextAddr->getType()->getPointerElementType()));
+  IRBuilder.CreateCall(ForkedFn);
 
   return OutlinedFn;
 }

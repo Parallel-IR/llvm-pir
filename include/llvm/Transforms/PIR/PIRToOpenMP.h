@@ -54,13 +54,15 @@ private:
   /// Emits the implicit args needed for an outlined OMP region function.
   void emitImplicitArgs(BasicBlock *PRFuncEntryBB);
 
-  void emitMasterRegion(Function *F, const DataLayout &DL);
+  void emitMasterRegion(Function *F, const DataLayout &DL, Function *ForkedFn,
+                        Function *ContFn);
   Value *emitTaskInit(Module *M, Function *Caller, IRBuilder<> &CallerIRBuilder,
-                      const DataLayout &DL);
+                      const DataLayout &DL, Function *ForkedFn);
   Function *emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
                                   Type *SharedsPtrTy, Value *TaskFunction,
                                   Value *TaskPrivatesMap);
-  Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy);
+  Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy,
+                                     Function *ForkedFn);
   /// Emits code needed to express the semantics of a sections construct
   void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
                     Function *ForkedFn, Function *ContFn);
