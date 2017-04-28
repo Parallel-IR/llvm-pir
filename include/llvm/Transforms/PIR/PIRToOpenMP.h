@@ -13,6 +13,8 @@ enum OpenMPRuntimeFunction {
   OMPRTL__kmpc_for_static_fini,
   OMPRTL__kmpc_master,
   OMPRTL__kmpc_end_master,
+  OMPRTL__kmpc_omp_task_alloc,
+  OMPRTL__kmpc_omp_task,
 };
 
 enum OpenMPSchedType {
@@ -47,17 +49,17 @@ private:
                             const Twine &Name, BasicBlock *Parent) const;
   /// Emits calls to some OMP runtime functions.
   CallInst *emitRuntimeCall(Value *Callee, ArrayRef<Value *> Args,
-                            const Twine &Name) const;
+                            const Twine &Name, IRBuilder<> &IRBuilder) const;
 
   /// Emits the implicit args needed for an outlined OMP region function.
   void emitImplicitArgs(BasicBlock *PRFuncEntryBB);
 
   void emitMasterRegion(Function *F, const DataLayout &DL);
-
-  void emitTaskInit(Module *M);
-  void emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
-                             Type *SharedsPtrTy, Value *TaskFunction,
-                             Value *TaskPrivatesMap);
+  Value *emitTaskInit(Module *M, Function *Caller, IRBuilder<> &CallerIRBuilder,
+                      const DataLayout &DL);
+  Function *emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
+                                  Type *SharedsPtrTy, Value *TaskFunction,
+                                  Value *TaskPrivatesMap);
   Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy);
   /// Emits code needed to express the semantics of a sections construct
   void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,

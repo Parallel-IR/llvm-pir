@@ -202,6 +202,29 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
     RTLFn = M->getOrInsertFunction("__kmpc_end_master", FnTy);
     break;
   }
+  case OMPRTL__kmpc_omp_task_alloc: {
+    auto *Int32Ty = Type::getInt32Ty(M->getContext());
+    auto *VoidPtrTy = Type::getInt8PtrTy(M->getContext());
+    // TODO double check for how SizeTy get created. Eventually, it get emitted
+    // as i64 on my machine.
+    auto *SizeTy = Type::getInt64Ty(M->getContext());
+    Type *TypeParams[] = {
+        getIdentTyPointerTy(), Int32Ty, Int32Ty, SizeTy, SizeTy,
+        KmpRoutineEntryPtrTy};
+    FunctionType *FnTy =
+        FunctionType::get(VoidPtrTy, TypeParams, /*isVarArg=*/false);
+    RTLFn = M->getOrInsertFunction("__kmpc_omp_task_alloc", FnTy);
+    break;
+  }
+  case OMPRTL__kmpc_omp_task: {
+    auto *Int32Ty = Type::getInt32Ty(M->getContext());
+    auto *VoidPtrTy = Type::getInt8PtrTy(M->getContext());
+    Type *TypeParams[] = {getIdentTyPointerTy(), Int32Ty, VoidPtrTy};
+    FunctionType *FnTy =
+        FunctionType::get(Int32Ty, TypeParams, /*isVarArg=*/false);
+    RTLFn = M->getOrInsertFunction("__kmpc_omp_task", FnTy);
+    break;
+  }
   }
   return RTLFn;
 }
@@ -217,8 +240,9 @@ CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
 
 CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
                                            ArrayRef<Value *> Args,
-                                           const Twine &Name) const {
-  CallInst *call = StoreIRBuilder->CreateCall(Callee, Args, None, Name);
+                                           const Twine &Name,
+                                           IRBuilder<> &IRBuilder) const {
+  CallInst *call = IRBuilder.CreateCall(Callee, Args, None, Name);
   return call;
 }
 
@@ -263,10 +287,10 @@ void PIRToOpenMPPass::emitImplicitArgs(BasicBlock *PRFuncEntryBB) {
 void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL) {
   Module *M = F->getParent();
   LLVMContext &C = F->getContext();
-  ArrayRef<Value *> Args = {DefaultOpenMPLocation, getThreadID(F, DL)};
+  ArrayRef<Value *> MasterArgs = {DefaultOpenMPLocation, getThreadID(F, DL)};
   auto MasterRTFn =
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_master, M);
-  auto IsMaster = emitRuntimeCall(MasterRTFn, Args, "");
+  auto IsMaster = emitRuntimeCall(MasterRTFn, MasterArgs, "", *StoreIRBuilder);
 
   BasicBlock *IfThenBB = BasicBlock::Create(C, "omp_if.then", F, nullptr);
   BasicBlock *IfEndBB = BasicBlock::Create(C, "omp_if.end", F, nullptr);
@@ -275,50 +299,78 @@ void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL) {
   StoreIRBuilder->CreateCondBr(Cond, IfThenBB, IfEndBB);
 
   StoreIRBuilder->SetInsertPoint(IfThenBB);
+
+  auto *NewTask = emitTaskInit(M, F, *StoreIRBuilder, DL);
+  ArrayRef<Value *> TaskArgs = {DefaultOpenMPLocation, getThreadID(F, DL),
+                                NewTask};
+  emitRuntimeCall(
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task, M),
+      TaskArgs, "", *StoreIRBuilder);
+
   auto EndMasterRTFn =
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_end_master, M);
-  emitRuntimeCall(EndMasterRTFn, Args, "");
+  emitRuntimeCall(EndMasterRTFn, MasterArgs, "", *StoreIRBuilder);
   emitBranch(IfEndBB);
-
-  emitTaskInit(M);
 }
 
 // Creates some data structures that are needed for the actual task work. It
 // then calls into emitProxyTaskFunction which starts  code generation for the
 // task
-void PIRToOpenMPPass::emitTaskInit(Module *M) {
+Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
+                                     IRBuilder<> &CallerIRBuilder,
+                                     const DataLayout &DL) {
   LLVMContext &C = M->getContext();
   auto *SharedsTy = StructType::create("anon", Type::getInt8Ty(C), nullptr);
   auto *SharedsPtrTy = PointerType::getUnqual(SharedsTy);
+  auto *SharedsTySize =
+      CallerIRBuilder.getInt64(DL.getTypeAllocSize(SharedsTy));
   emitKmpRoutineEntryT(M);
   auto *KmpTaskTTy = createKmpTaskTTy(M, KmpRoutineEntryPtrTy);
   auto *KmpTaskTWithPrivatesTy = createKmpTaskTWithPrivatesTy(KmpTaskTTy);
   auto *KmpTaskTWithPrivatesPtrTy =
       PointerType::getUnqual(KmpTaskTWithPrivatesTy);
+  auto *KmpTaskTWithPrivatesTySize =
+      CallerIRBuilder.getInt64(DL.getTypeAllocSize(KmpTaskTWithPrivatesTy));
   auto OutlinedFn = emitTaskOutlinedFunction(M, SharedsPtrTy);
-  OutlinedFn->dump();
   auto *TaskPrivatesMapTy = std::next(OutlinedFn->arg_begin(), 3)->getType();
   // NOTE for future use
   auto *TaskPrivatesMap =
       ConstantPointerNull::get(cast<PointerType>(TaskPrivatesMapTy));
 
-  emitProxyTaskFunction(M, KmpTaskTWithPrivatesPtrTy, SharedsPtrTy, OutlinedFn,
-                        TaskPrivatesMap);
+  auto *TaskEntry = emitProxyTaskFunction(
+      M, KmpTaskTWithPrivatesPtrTy, SharedsPtrTy, OutlinedFn, TaskPrivatesMap);
+
+  // NOTE check CGOpenMPRuntime::emitTaskInit for the complete set of task
+  // flags. We only need tied tasks for now and that's what the 1 value is for.
+  auto *TaskFlags = CallerIRBuilder.getInt32(1);
+  ArrayRef<Value *> AllocArgs = {
+      DefaultOpenMPLocation,
+      getThreadID(Caller, DL),
+      TaskFlags,
+      KmpTaskTWithPrivatesTySize,
+      SharedsTySize,
+      CallerIRBuilder.CreatePointerBitCastOrAddrSpaceCast(
+          TaskEntry, KmpRoutineEntryPtrTy)};
+  auto *NewTask = emitRuntimeCall(
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task_alloc,
+                            Caller->getParent()),
+      AllocArgs, "", CallerIRBuilder);
+  return NewTask;
 }
 
 // Emits some boilerplate code to kick off the task work and then calls the
 // function that does the actual work.
-void PIRToOpenMPPass::emitProxyTaskFunction(Module *M,
-                                            Type *KmpTaskTWithPrivatesPtrTy,
-                                            Type *SharedsPtrTy,
-                                            Value *TaskFunction,
-                                            Value *TaskPrivatesMap) {
+Function *PIRToOpenMPPass::emitProxyTaskFunction(
+    Module *M, Type *KmpTaskTWithPrivatesPtrTy, Type *SharedsPtrTy,
+    Value *TaskFunction, Value *TaskPrivatesMap) {
   auto &C = M->getContext();
   auto *Int32Ty = Type::getInt32Ty(C);
   ArrayRef<Type *> ArgTys = {Int32Ty, KmpTaskTWithPrivatesPtrTy};
   auto *TaskEntryTy = FunctionType::get(Int32Ty, ArgTys, false);
   auto *TaskEntry = Function::Create(TaskEntryTy, GlobalValue::InternalLinkage,
                                      ".omp_task_entry.", M);
+  TaskEntry->addFnAttr(Attribute::NoInline);
+  TaskEntry->addFnAttr(Attribute::UWTable);
   DataLayout DL(M);
   auto *EntryBB = BasicBlock::Create(C, "entry", TaskEntry, nullptr);
 
@@ -369,7 +421,7 @@ void PIRToOpenMPPass::emitProxyTaskFunction(Module *M,
 
   IRBuilder.CreateCall(TaskFunction, TaskParams);
   IRBuilder.CreateRet(IRBuilder.getInt32(0));
-  TaskEntry->dump();
+  return TaskEntry;
 }
 
 Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
@@ -465,7 +517,7 @@ void PIRToOpenMPPass::emitSections(Function *F, LLVMContext &C,
       StoreIRBuilder->getIntN(32, 1),                    // Incr
       StoreIRBuilder->getIntN(32, 1)                     // Chunk
   };
-  emitRuntimeCall(ForStaticInitFunction, Args, "");
+  emitRuntimeCall(ForStaticInitFunction, Args, "", *StoreIRBuilder);
 
   auto *UBVal = emitAlignedLoad(UB, DL);
   auto *MinUBGlobalUB = StoreIRBuilder->CreateSelect(
@@ -561,7 +613,7 @@ void PIRToOpenMPPass::emitForStaticFinish(Function *F, const DataLayout &DL) {
   emitRuntimeCall(
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_for_static_fini,
                             F->getParent()),
-      Args, "");
+      Args, "", *StoreIRBuilder);
 }
 
 // By the end of emitBlock the IRBuilder will be positioned at the start
