@@ -225,6 +225,14 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
     RTLFn = M->getOrInsertFunction("__kmpc_omp_task", FnTy);
     break;
   }
+  case OMPRTL__kmpc_omp_taskwait: {
+    auto *Int32Ty = Type::getInt32Ty(M->getContext());
+    Type *TypeParams[] = {getIdentTyPointerTy(), Int32Ty};
+    FunctionType *FnTy =
+        FunctionType::get(Int32Ty, TypeParams, /*isVarArg=*/false);
+    RTLFn = M->getOrInsertFunction("__kmpc_omp_taskwait", FnTy);
+    break;
+  }
   }
   return RTLFn;
 }
@@ -310,6 +318,7 @@ void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL,
 
   StoreIRBuilder->CreateCall(ContFn);
 
+  emitTaskwaitCall(F, *StoreIRBuilder, DL);
   auto EndMasterRTFn =
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_end_master, M);
   emitRuntimeCall(EndMasterRTFn, MasterArgs, "", *StoreIRBuilder);
@@ -321,8 +330,7 @@ void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL,
 // task
 Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
                                      IRBuilder<> &CallerIRBuilder,
-                                     const DataLayout &DL,
-                                     Function *ForkedFn) {
+                                     const DataLayout &DL, Function *ForkedFn) {
   LLVMContext &C = M->getContext();
   auto *SharedsTy = StructType::create("anon", Type::getInt8Ty(C), nullptr);
   auto *SharedsPtrTy = PointerType::getUnqual(SharedsTy);
@@ -468,6 +476,16 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
   IRBuilder.CreateCall(ForkedFn);
 
   return OutlinedFn;
+}
+
+void PIRToOpenMPPass::emitTaskwaitCall(Function *Caller,
+                                       IRBuilder<> &CallerIRBuilder,
+                                       const DataLayout &DL) {
+  ArrayRef<Value *> Args = {DefaultOpenMPLocation, getThreadID(Caller, DL)};
+  emitRuntimeCall(
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_taskwait,
+                            Caller->getParent()),
+      Args, "", CallerIRBuilder);
 }
 
 // NOTE check CodeGenFunction::EmitSections for more details

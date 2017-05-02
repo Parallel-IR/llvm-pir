@@ -15,6 +15,7 @@ enum OpenMPRuntimeFunction {
   OMPRTL__kmpc_end_master,
   OMPRTL__kmpc_omp_task_alloc,
   OMPRTL__kmpc_omp_task,
+  OMPRTL__kmpc_omp_taskwait,
 };
 
 enum OpenMPSchedType {
@@ -63,6 +64,8 @@ private:
                                   Value *TaskPrivatesMap);
   Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy,
                                      Function *ForkedFn);
+  void emitTaskwaitCall(Function *Caller, IRBuilder<> &CallerIRBuilder,
+                        const DataLayout &DL);
   /// Emits code needed to express the semantics of a sections construct
   void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
                     Function *ForkedFn, Function *ContFn);
