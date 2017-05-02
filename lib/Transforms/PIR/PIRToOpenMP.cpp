@@ -1,4 +1,8 @@
 #include "llvm/Transforms/PIR/PIRToOpenMP.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/CodeExtractor.h"
+
 // TODO the way I traverse the regions now results in every one being
 // an top-level region. Modify that to traverse in reverse order instead.
 // But first make it work for simple regions.
@@ -38,94 +42,257 @@ void PIRToOpenMPPass::dump() const { PRI->dump(); }
 #endif
 
 void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
-  assert(PR.hasTwoSingleExits() && "More than 2 exits is yet to be handled");
+  // Split the fork instruction parant into 2 BBs to satisfy the assumption
+  // of CodeExtractor (single-entry region and the head BB is the entry)
+  auto &ForkInst = PR.getFork();
+  auto *OldForkInstBB = ForkInst.getParent();
+  auto *NewForkInstBB = SplitBlock(OldForkInstBB, &ForkInst);
 
-  auto &F = *PR.getFork().getParent()->getParent();
-  auto &M = *(Module *)F.getParent();
-  auto &C = M.getContext();
-  DataLayout DL(&M);
+  auto &ForkedTask = PR.getForkedTask();
+  auto &ContTask = PR.getContinuationTask();
 
-  // Generate the name of the outlined function for the region
-  auto FName = F.getName();
-  auto ForkBB = (BasicBlock *)PR.getFork().getParent();
-  auto PRName = ForkBB->getName();
-  auto PRFName = FName + "." + PRName;
-  FunctionType *RFunctionTy = nullptr;
-  Function *RFunction = nullptr;
+  Function *SpawningFn = ForkInst.getParent()->getParent();
+  auto *Module = SpawningFn->getParent();
+  auto &Context = Module->getContext();
 
-  IRBuilder<> ForkBBIRBuilder(ForkBB);
+  // Collect all the BBs of forked and continuation tasks for extraction
+  std::vector<BasicBlock *> RegionBBs;
+  // Keep track of which blocks belong to forked and cont tasks because we
+  // are about to replace fork-join instructions by regular branches
+  std::vector<BasicBlock *> ForkedBBs;
+  std::vector<BasicBlock *> ContBBs;
+  RegionBBs.push_back(NewForkInstBB);
 
-  if (PR.isTopLevelRegion()) {
-    // NOTE check CodeGenFunction::GenerateOpenMPCapturedStmtFunction for
-    // details of this is done in OMP Clang. At least the outlined function
-    // is alaways created with InternalLinkage all the time.
-    RFunction =
-        Function::Create(getOrCreateKmpc_MicroTy(C),
-                         GlobalValue::InternalLinkage, PRFName.str(), &M);
-    // Set to C coding convension
-    RFunction->setCallingConv(static_cast<CallingConv::ID>(0));
+  ParallelTask::VisitorTy ForkedVisitor =
+      [&RegionBBs, &ForkedBBs](BasicBlock &BB, const ParallelTask &PT) -> bool {
+    RegionBBs.push_back(&BB);
+    ForkedBBs.push_back(&BB);
 
-    // NOTE for now, I only added the attributes that I think are required
-    // Clang adds a huge set of other default attrs but I think they only
-    // affect the optimization of the code and not its correctness.
-    RFunction->addFnAttr(Attribute::NoUnwind);
-    RFunction->addFnAttr(Attribute::UWTable);
-    RFunction->addFnAttr(Attribute::NoReturn);
-  } else {
-    RFunctionTy = FunctionType::get(Type::getVoidTy(C), false);
-    RFunction = (Function *)M.getOrInsertFunction(PRFName.str(), RFunctionTy);
+    return true;
+  };
+
+  ParallelTask::VisitorTy ContVisitor =
+      [&RegionBBs, &ContBBs](BasicBlock &BB, const ParallelTask &PT) -> bool {
+    RegionBBs.push_back(&BB);
+    ContBBs.push_back(&BB);
+
+    return true;
+  };
+
+  ForkedTask.visit(ForkedVisitor, true);
+  ContTask.visit(ContVisitor, true);
+
+  // Replace fork with branch
+  BranchInst::Create(&ForkedTask.getEntry(), &ForkInst);
+  ForkInst.eraseFromParent();
+
+  // Replace halts with branches
+  for (auto *I : ForkedTask.getHaltsOrJoints()) {
+    if (HaltInst *HI = dyn_cast<HaltInst>(I)) {
+      BranchInst::Create(HI->getContinuationBB(), HI);
+      HI->eraseFromParent();
+    } else {
+      assert(false && "A forked task is terminated by a join instruction");
+    }
   }
 
-  if (PR.isTopLevelRegion()) {
-    ArrayRef<Value *> Args = {
-        DefaultOpenMPLocation, ConstantInt::getSigned(Type::getInt32Ty(C), 0),
-        ForkBBIRBuilder.CreateBitCast(RFunction, getKmpc_MicroPointerTy(C))};
-    auto ForkRTFn = createRuntimeFunction(
-        OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, &M);
-    emitRuntimeCall(ForkRTFn, Args, "", ForkBB);
-  } else {
-    CallInst::Create(RFunction, "", ForkBB);
+  // Replace joins with branches
+  for (auto *I : ContTask.getHaltsOrJoints()) {
+    if (JoinInst *JI = dyn_cast<JoinInst>(I)) {
+      BranchInst::Create(JI->getSuccessor(0), JI);
+      JI->eraseFromParent();
+    } else {
+      assert(false &&
+             "A continuation task is terminated by a halt instruction");
+    }
   }
-  BasicBlock *PRFuncEntryBB =
-      BasicBlock::Create(C, "entry", RFunction, nullptr);
-  // BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
-  // nullptr);
 
-  JoinInst *JI =
-      dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
-  BranchInst::Create(JI->getSuccessor(0), ForkBB);
-  // JI->setSuccessor(0, PRFuncExitBB);
+  CodeExtractor RegionExtractor(RegionBBs);
+  Function *RegionFn = RegionExtractor.extractCodeRegion();
+  auto *OMPRegionFn = createOMPRegionFn(RegionFn, Module, Context);
+  std::vector<Value *> RegionFnCallArgs;
 
-  // Emit 2 outlined functions for forked and continuation tasks
-  auto ForkedFunction = emitTaskFunction(PR, true);
-  auto ContFunction = emitTaskFunction(PR, false);
+  for (auto &BB : *SpawningFn) {
+    if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
+      if (RegionFn == CI->getCalledFunction()) {
+        IRBuilder<> IRBuilder(CI);
+        std::vector<Value *> OMPRegionFnArgs = {
+          DefaultOpenMPLocation,
+          ConstantInt::getSigned(Type::getInt32Ty(Context), 0),
+          IRBuilder.CreateBitCast(OMPRegionFn,
+                                  getKmpc_MicroPointerTy(Context))};
 
-  PR.getFork().eraseFromParent();
+       auto ArgIt = CI->arg_begin();
 
-  auto Int32Ty = Type::getInt32Ty(C);
-  Value *Undef = UndefValue::get(Int32Ty);
-  AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt", PRFuncEntryBB);
-  AllocaIRBuilder = new IRBuilder<>(
-      PRFuncEntryBB, ((Instruction *)AllocaInsertPt)->getIterator());
-  StoreIRBuilder = new IRBuilder<>(PRFuncEntryBB);
+        while (ArgIt != CI->arg_end()) {
+          OMPRegionFnArgs.push_back(ArgIt->get());
+          ++ArgIt;
+        }
 
-  if (PR.isTopLevelRegion()) {
-    emitImplicitArgs(PRFuncEntryBB);
-    // emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
-    emitMasterRegion(RFunction, DL, ForkedFunction, ContFunction);
+        // Replace the old call with __kmpc_fork_call
+        auto ForkRTFn = createRuntimeFunction(
+            OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, Module);
+        emitRuntimeCall(ForkRTFn, OMPRegionFnArgs, "", IRBuilder);
+
+        CI->eraseFromParent();
+
+        break;
+      }
+    }
   }
-  // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
-  // CallInst::Create(ContFunction, "", PRFuncEntryBB);
-  // BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
-  // ReturnInst::Create(M.getContext(), PRFuncExitBB);
-  StoreIRBuilder->CreateRetVoid();
 
-  AllocaInsertPt->eraseFromParent();
-  delete AllocaIRBuilder;
-  AllocaIRBuilder = nullptr;
-  delete StoreIRBuilder;
-  StoreIRBuilder = nullptr;
+  ValueToValueMapTy VMap;
+  // Skip the first 2 arguments (global_tid and bound_tid) ...
+  auto OMPArgIt = OMPRegionFn->arg_begin();
+  ++OMPArgIt;
+  ++OMPArgIt;
+  // ... then map corresponding arguments in RegionFn and OMPRegionFn
+  auto &RegionFnArgList = RegionFn->getArgumentList();
+
+  for (auto &Arg : RegionFnArgList) {
+    VMap[&Arg] = &*OMPArgIt;
+    ++OMPArgIt;
+  }
+
+  // Move all BBs from RegionFn to OMPRegionFn
+  OMPRegionFn->getBasicBlockList().splice(OMPRegionFn->begin(),
+                                          RegionFn->getBasicBlockList());
+
+  for (auto &BB : *OMPRegionFn) {
+    for (auto &I : BB) {
+      for (unsigned i = 0, e = I.getNumOperands(); i != e; ++i) {
+        if (Argument *OpArg = dyn_cast<Argument>(I.getOperand(i))) {
+          I.setOperand(i, VMap[OpArg]);
+        }
+      }
+    }
+  }
+
+  RegionFn->eraseFromParent();
 }
+
+Function *PIRToOpenMPPass::createOMPRegionFn(Function *RegionFn, Module *Module,
+                                             LLVMContext &Context) {
+  std::vector<Type *> FnParams = {
+      PointerType::getUnqual(Type::getInt32Ty(Context)),
+      PointerType::getUnqual(Type::getInt32Ty(Context))};
+  std::vector<StringRef> FnArgNames = {".global_tid.", ".bound_tid."};
+
+  auto &RegionFnArgList = RegionFn->getArgumentList();
+
+  for (auto &Arg : RegionFnArgList) {
+    FnParams.push_back(Arg.getType());
+    FnArgNames.push_back(Arg.getName());
+  }
+
+  auto *OMPRegionFnTy =
+      FunctionType::get(Type::getVoidTy(Context), FnParams, false);
+  auto OMPRegionFnName = RegionFn->getName() + ".OMP";
+
+  Function *OMPRegionFn = dyn_cast<Function>(
+      Module->getOrInsertFunction(OMPRegionFnName.str(), OMPRegionFnTy));
+  auto &FnArgList = OMPRegionFn->getArgumentList();
+
+  int i = 0;
+  for (auto &Arg : FnArgList) {
+    Arg.setName(FnArgNames[i]);
+    ++i;
+  }
+
+  return OMPRegionFn;
+}
+
+// void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
+//   assert(PR.hasTwoSingleExits() && "More than 2 exits is yet to be handled");
+
+//   auto &F = *PR.getFork().getParent()->getParent();
+//   auto &M = *(Module *)F.getParent();
+//   auto &C = M.getContext();
+//   DataLayout DL(&M);
+
+//   // Generate the name of the outlined function for the region
+//   auto FName = F.getName();
+//   auto ForkBB = (BasicBlock *)PR.getFork().getParent();
+//   auto PRName = ForkBB->getName();
+//   auto PRFName = FName + "." + PRName;
+//   FunctionType *RFunctionTy = nullptr;
+//   Function *RFunction = nullptr;
+
+//   IRBuilder<> ForkBBIRBuilder(ForkBB);
+
+//   if (PR.isTopLevelRegion()) {
+//     // NOTE check CodeGenFunction::GenerateOpenMPCapturedStmtFunction for
+//     // details of this is done in OMP Clang. At least the outlined function
+//     // is alaways created with InternalLinkage all the time.
+//     RFunction =
+//         Function::Create(getOrCreateKmpc_MicroTy(C),
+//                          GlobalValue::InternalLinkage, PRFName.str(), &M);
+//     // Set to C coding convension
+//     RFunction->setCallingConv(static_cast<CallingConv::ID>(0));
+
+//     // NOTE for now, I only added the attributes that I think are required
+//     // Clang adds a huge set of other default attrs but I think they only
+//     // affect the optimization of the code and not its correctness.
+//     RFunction->addFnAttr(Attribute::NoUnwind);
+//     RFunction->addFnAttr(Attribute::UWTable);
+//     RFunction->addFnAttr(Attribute::NoReturn);
+//   } else {
+//     RFunctionTy = FunctionType::get(Type::getVoidTy(C), false);
+//     RFunction = (Function *)M.getOrInsertFunction(PRFName.str(),
+//     RFunctionTy);
+//   }
+
+//   if (PR.isTopLevelRegion()) {
+//     ArrayRef<Value *> Args = {
+//         DefaultOpenMPLocation, ConstantInt::getSigned(Type::getInt32Ty(C),
+//         0), ForkBBIRBuilder.CreateBitCast(RFunction,
+//         getKmpc_MicroPointerTy(C))};
+//     auto ForkRTFn = createRuntimeFunction(
+//         OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, &M);
+//     emitRuntimeCall(ForkRTFn, Args, "", ForkBB);
+//   } else {
+//     CallInst::Create(RFunction, "", ForkBB);
+//   }
+//   BasicBlock *PRFuncEntryBB =
+//       BasicBlock::Create(C, "entry", RFunction, nullptr);
+//   // BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
+//   // nullptr);
+
+//   JoinInst *JI =
+//       dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
+//   BranchInst::Create(JI->getSuccessor(0), ForkBB);
+//   // JI->setSuccessor(0, PRFuncExitBB);
+
+//   // Emit 2 outlined functions for forked and continuation tasks
+//   auto ForkedFunction = emitTaskFunction(PR, true);
+//   auto ContFunction = emitTaskFunction(PR, false);
+
+//   PR.getFork().eraseFromParent();
+
+//   auto Int32Ty = Type::getInt32Ty(C);
+//   Value *Undef = UndefValue::get(Int32Ty);
+//   AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt",
+//   PRFuncEntryBB); AllocaIRBuilder = new IRBuilder<>(
+//       PRFuncEntryBB, ((Instruction *)AllocaInsertPt)->getIterator());
+//   StoreIRBuilder = new IRBuilder<>(PRFuncEntryBB);
+
+//   if (PR.isTopLevelRegion()) {
+//     emitImplicitArgs(PRFuncEntryBB);
+//     // emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
+//     emitMasterRegion(RFunction, DL, ForkedFunction, ContFunction);
+//   }
+//   // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
+//   // CallInst::Create(ContFunction, "", PRFuncEntryBB);
+//   // BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
+//   // ReturnInst::Create(M.getContext(), PRFuncExitBB);
+//   StoreIRBuilder->CreateRetVoid();
+
+//   AllocaInsertPt->eraseFromParent();
+//   delete AllocaIRBuilder;
+//   AllocaIRBuilder = nullptr;
+//   delete StoreIRBuilder;
+//   StoreIRBuilder = nullptr;
+// }
 
 Function *PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR,
                                             bool IsForked) const {

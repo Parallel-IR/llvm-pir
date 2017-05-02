@@ -39,6 +39,8 @@ public:
 private:
   /// Emits the outlined function corresponding to the parallel region.
   void emitRegionFunction(const ParallelRegion &PR);
+  Function *createOMPRegionFn(Function *RegionFn, Module *Module,
+                                               LLVMContext &Context);
   /// Emits the outlined function corresponding to the parallel task (whehter
   /// forked or continuation).
   Function *emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
