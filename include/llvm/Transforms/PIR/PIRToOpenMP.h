@@ -40,7 +40,7 @@ private:
   /// Emits the outlined function corresponding to the parallel region.
   void emitRegionFunction(const ParallelRegion &PR);
   Function *createOMPRegionFn(Function *RegionFn, Module *Module,
-                                               LLVMContext &Context);
+                              LLVMContext &Context);
   /// Emits the outlined function corresponding to the parallel task (whehter
   /// forked or continuation).
   Function *emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
@@ -55,10 +55,14 @@ private:
                             const Twine &Name, IRBuilder<> &IRBuilder) const;
 
   /// Emits the implicit args needed for an outlined OMP region function.
-  void emitImplicitArgs(BasicBlock *PRFuncEntryBB);
+  void emitImplicitArgs(Function *OMPRegionFn, IRBuilder<> &AllocaIRBuilder,
+                        IRBuilder<> &StoreIRBuilder);
+  /* void emitImplicitArgs(BasicBlock *PRFuncEntryBB); */
 
-  void emitMasterRegion(Function *F, const DataLayout &DL, Function *ForkedFn,
-                        Function *ContFn);
+  void emitMasterRegion(Function *OMPRegionFn, IRBuilder<> &IRBuilder);
+  /* void emitMasterRegion(Function *F, const DataLayout &DL, Function
+   * *ForkedFn, */
+  /*                       Function *ContFn); */
   Value *emitTaskInit(Module *M, Function *Caller, IRBuilder<> &CallerIRBuilder,
                       const DataLayout &DL, Function *ForkedFn);
   Function *emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
@@ -93,9 +97,10 @@ private:
 
   /// A helper to emit a basic block and transform the builder insertion
   /// point to its start.
-  void emitBlock(Function *F, BasicBlock *BB, bool IsFinished = false);
+  void emitBlock(Function *F, IRBuilder<> &IRBuilder, BasicBlock *BB,
+                 bool IsFinished = false);
   /// A helper to emit a branch to a BB.
-  void emitBranch(BasicBlock *Target);
+  void emitBranch(BasicBlock *Target, IRBuilder<> &IRBuilder);
   /// Creates an aligned load.
   Value *emitAlignedLoad(Value *Addr, const DataLayout &DL);
   /// Creates an aligned store.
@@ -103,7 +108,8 @@ private:
 
   /// Emits code to load the value of the thread ID variable of a parallel
   /// thread.
-  Value *getThreadID(Function *F, const DataLayout &DL);
+  Value *getThreadID(Function *F);
+  Value *getThreadID(Function *F, IRBuilder<> &IRBuilder);
 
   Type *getOrCreateIdentTy(Module *M);
   PointerType *getIdentTyPointerTy() const;
