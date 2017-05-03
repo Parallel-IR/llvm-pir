@@ -154,20 +154,6 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
     ++OMPArgIt;
   }
 
-  // Move all BBs from RegionFn to OMPRegionFn
-  // OMPRegionFn->getBasicBlockList().splice(OMPRegionFn->begin(),
-  //                                         RegionFn->getBasicBlockList());
-
-  // for (auto &BB : *OMPRegionFn) {
-  //   for (auto &I : BB) {
-  //     for (unsigned i = 0, e = I.getNumOperands(); i != e; ++i) {
-  //       if (Argument *OpArg = dyn_cast<Argument>(I.getOperand(i))) {
-  //         I.setOperand(i, VMap[OpArg]);
-  //       }
-  //     }
-  //   }
-  // }
-
   auto *EntryBB = BasicBlock::Create(Context, "entry", OMPRegionFn, nullptr);
   auto Int32Ty = Type::getInt32Ty(Context);
   Value *Undef = UndefValue::get(Int32Ty);
@@ -175,26 +161,12 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
   IRBuilder<> AllocaIRBuilder(EntryBB,
                               ((Instruction *)AllocaInsertPt)->getIterator());
 
-  // // Try to find the first load instruction. We want to emit all argument
-  // // stores before any load.
-  // auto FirstLoadIt = EntryBB->begin();
-
-  // while (FirstLoadIt != EntryBB->end()) {
-  //   if (dyn_cast<LoadInst>(&*FirstLoadIt) ||
-  //       dyn_cast<TerminatorInst>(&*FirstLoadIt)) {
-  //     break;
-  //   }
-
-  //   ++FirstLoadIt;
-  // }
-
   IRBuilder<> StoreIRBuilder(EntryBB);
   emitImplicitArgs(OMPRegionFn, AllocaIRBuilder, StoreIRBuilder);
   emitMasterRegion(OMPRegionFn, StoreIRBuilder);
   StoreIRBuilder.CreateRetVoid();
 
   AllocaInsertPt->eraseFromParent();
-  // RegionFn->eraseFromParent();
 
   OMPRegionFn->dump();
 }
@@ -240,98 +212,6 @@ Function *PIRToOpenMPPass::createOMPRegionFn(Function *RegionFn, Module *Module,
 
   return OMPRegionFn;
 }
-
-// void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
-//   assert(PR.hasTwoSingleExits() && "More than 2 exits is yet to be handled");
-
-//   auto &F = *PR.getFork().getParent()->getParent();
-//   auto &M = *(Module *)F.getParent();
-//   auto &C = M.getContext();
-//   DataLayout DL(&M);
-
-//   // Generate the name of the outlined function for the region
-//   auto FName = F.getName();
-//   auto ForkBB = (BasicBlock *)PR.getFork().getParent();
-//   auto PRName = ForkBB->getName();
-//   auto PRFName = FName + "." + PRName;
-//   FunctionType *RFunctionTy = nullptr;
-//   Function *RFunction = nullptr;
-
-//   IRBuilder<> ForkBBIRBuilder(ForkBB);
-
-//   if (PR.isTopLevelRegion()) {
-//     // NOTE check CodeGenFunction::GenerateOpenMPCapturedStmtFunction for
-//     // details of this is done in OMP Clang. At least the outlined function
-//     // is alaways created with InternalLinkage all the time.
-//     RFunction =
-//         Function::Create(getOrCreateKmpc_MicroTy(C),
-//                          GlobalValue::InternalLinkage, PRFName.str(), &M);
-//     // Set to C coding convension
-//     RFunction->setCallingConv(static_cast<CallingConv::ID>(0));
-
-//     // NOTE for now, I only added the attributes that I think are required
-//     // Clang adds a huge set of other default attrs but I think they only
-//     // affect the optimization of the code and not its correctness.
-//     RFunction->addFnAttr(Attribute::NoUnwind);
-//     RFunction->addFnAttr(Attribute::UWTable);
-//     RFunction->addFnAttr(Attribute::NoReturn);
-//   } else {
-//     RFunctionTy = FunctionType::get(Type::getVoidTy(C), false);
-//     RFunction = (Function *)M.getOrInsertFunction(PRFName.str(),
-//     RFunctionTy);
-//   }
-
-//   if (PR.isTopLevelRegion()) {
-//     ArrayRef<Value *> Args = {
-//         DefaultOpenMPLocation, ConstantInt::getSigned(Type::getInt32Ty(C),
-//         0), ForkBBIRBuilder.CreateBitCast(RFunction,
-//         getKmpc_MicroPointerTy(C))};
-//     auto ForkRTFn = createRuntimeFunction(
-//         OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, &M);
-//     emitRuntimeCall(ForkRTFn, Args, "", ForkBB);
-//   } else {
-//     CallInst::Create(RFunction, "", ForkBB);
-//   }
-//   BasicBlock *PRFuncEntryBB =
-//       BasicBlock::Create(C, "entry", RFunction, nullptr);
-//   // BasicBlock *PRFuncExitBB = BasicBlock::Create(C, "exit", RFunction,
-//   // nullptr);
-
-//   JoinInst *JI =
-//       dyn_cast<JoinInst>(PR.getContinuationTask().getHaltsOrJoints()[0]);
-//   BranchInst::Create(JI->getSuccessor(0), ForkBB);
-//   // JI->setSuccessor(0, PRFuncExitBB);
-
-//   // Emit 2 outlined functions for forked and continuation tasks
-//   auto ForkedFunction = emitTaskFunction(PR, true);
-//   auto ContFunction = emitTaskFunction(PR, false);
-
-//   PR.getFork().eraseFromParent();
-
-//   auto Int32Ty = Type::getInt32Ty(C);
-//   Value *Undef = UndefValue::get(Int32Ty);
-//   AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt",
-//   PRFuncEntryBB); AllocaIRBuilder = new IRBuilder<>(
-//       PRFuncEntryBB, ((Instruction *)AllocaInsertPt)->getIterator());
-//   StoreIRBuilder = new IRBuilder<>(PRFuncEntryBB);
-
-//   if (PR.isTopLevelRegion()) {
-//     emitImplicitArgs(PRFuncEntryBB);
-//     // emitSections(RFunction, C, DL, ForkedFunction, ContFunction);
-//     emitMasterRegion(RFunction, DL, ForkedFunction, ContFunction);
-//   }
-//   // CallInst::Create(ForkedFunction, "", PRFuncEntryBB);
-//   // CallInst::Create(ContFunction, "", PRFuncEntryBB);
-//   // BranchInst::Create(PRFuncExitBB, PRFuncEntryBB);
-//   // ReturnInst::Create(M.getContext(), PRFuncExitBB);
-//   StoreIRBuilder->CreateRetVoid();
-
-//   AllocaInsertPt->eraseFromParent();
-//   delete AllocaIRBuilder;
-//   AllocaIRBuilder = nullptr;
-//   delete StoreIRBuilder;
-//   StoreIRBuilder = nullptr;
-// }
 
 Function *PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR,
                                             bool IsForked) const {
@@ -498,45 +378,6 @@ void PIRToOpenMPPass::emitImplicitArgs(Function *OMPRegionFn,
   }
 }
 
-// void PIRToOpenMPPass::emitImplicitArgs(BasicBlock *PRFuncEntryBB) {
-//   // NOTE check clang's CodeGenFunction::EmitFunctionProlog for a general
-//   // handling of function prologue emition
-//   auto RFunction = (Function *)PRFuncEntryBB->getParent();
-//   auto &C = RFunction->getContext();
-//   DataLayout DL(RFunction->getParent());
-
-//   // NOTE according to the docs in CodeGenFunction.h, it is preferable
-//   // to insert all alloca's at the start of the entry BB. But I am not
-//   // sure about the technical reason for this. To check later.
-//   //
-//   // It turns out this is to guarantee both performance and corrcetness,
-//   // check http://llvm.org/docs/Frontend/PerformanceTips.html#use-of-allocas
-
-//   auto emitArgProlog = [&](Argument &Arg, const Twine &Name) {
-//     Arg.setName(Name);
-//     Arg.addAttr(llvm::AttributeSet::get(C, Arg.getArgNo() + 1,
-//                                         llvm::Attribute::NoAlias));
-//     auto Alloca =
-//         AllocaIRBuilder->CreateAlloca(Arg.getType(), nullptr, Name +
-//         ".addr");
-//     Alloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
-//     StoreIRBuilder->CreateAlignedStore(&Arg, Alloca,
-//                                        DL.getTypeAllocSize(Arg.getType()));
-//     return (Value *)Alloca;
-//   };
-
-//   auto &ArgList = RFunction->getArgumentList();
-//   auto ArgI = ArgList.begin();
-//   auto GtidAlloca = emitArgProlog(*ArgI, ".global_tid.");
-//   // Add an entry for the current function (representing an outlined outer
-//   // region) and its associated global thread id address
-//   auto &Elem = OpenMPThreadIDAllocaMap.FindAndConstruct(RFunction);
-//   Elem.second = GtidAlloca;
-
-//   ++ArgI;
-//   emitArgProlog(*ArgI, ".bound_tid.");
-// }
-
 void PIRToOpenMPPass::emitMasterRegion(Function *OMPRegionFn,
                                        IRBuilder<> &IRBuilder) {
   Module *M = OMPRegionFn->getParent();
@@ -572,42 +413,6 @@ void PIRToOpenMPPass::emitMasterRegion(Function *OMPRegionFn,
   emitRuntimeCall(EndMasterRTFn, MasterArgs, "", IRBuilder);
   emitBranch(IfEndBB, IRBuilder);
 }
-
-// void PIRToOpenMPPass::emitMasterRegion(Function *F, const DataLayout &DL,
-//                                        Function *ForkedFn, Function *ContFn)
-//                                        {
-//   Module *M = F->getParent();
-//   LLVMContext &C = F->getContext();
-//   ArrayRef<Value *> MasterArgs = {DefaultOpenMPLocation, getThreadID(F, DL)};
-//   auto MasterRTFn =
-//       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_master, M);
-//   auto IsMaster = emitRuntimeCall(MasterRTFn, MasterArgs, "",
-//   *StoreIRBuilder);
-
-//   BasicBlock *IfThenBB = BasicBlock::Create(C, "omp_if.then", F, nullptr);
-//   BasicBlock *IfEndBB = BasicBlock::Create(C, "omp_if.end", F, nullptr);
-//   auto Cond =
-//       StoreIRBuilder->CreateICmpNE(IsMaster, StoreIRBuilder->getInt32(0));
-//   StoreIRBuilder->CreateCondBr(Cond, IfThenBB, IfEndBB);
-
-//   StoreIRBuilder->SetInsertPoint(IfThenBB);
-
-//   auto *NewTask = emitTaskInit(M, F, *StoreIRBuilder, DL, ForkedFn);
-//   ArrayRef<Value *> TaskArgs = {DefaultOpenMPLocation, getThreadID(F, DL),
-//                                 NewTask};
-//   emitRuntimeCall(
-//       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task, M),
-//       TaskArgs, "", *StoreIRBuilder);
-
-//   StoreIRBuilder->CreateCall(ContFn);
-
-//   emitTaskwaitCall(F, *StoreIRBuilder, DL);
-//   auto EndMasterRTFn =
-//       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_end_master,
-//       M);
-//   emitRuntimeCall(EndMasterRTFn, MasterArgs, "", *StoreIRBuilder);
-//   emitBranch(IfEndBB);
-// }
 
 // Creates some data structures that are needed for the actual task work. It
 // then calls into emitProxyTaskFunction which starts  code generation for the
