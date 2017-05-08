@@ -152,8 +152,8 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
       ForkedFnArgs, ForkedFnNestedArgs, ContFn, ContFnArgs, ContFnNestedArgs);
   emitOMPRegionFn(OMPRegionFn, Context, ForkedFn, ContFn, ForkedFnArgs,
                   ContFnArgs, false);
-  emitOMPRegionFn(OMPNestedRegionFn, Context, ForkedFn, ContFn, ForkedFnNestedArgs,
-                  ContFnNestedArgs, true);
+  emitOMPRegionFn(OMPNestedRegionFn, Context, ForkedFn, ContFn,
+                  ForkedFnNestedArgs, ContFnNestedArgs, true);
 }
 
 void PIRToOpenMPPass::emitOMPRegionFn(
@@ -835,10 +835,18 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
       FunctionType::get(Type::getVoidTy(C), {Type::getInt8PtrTy(C)}, true);
   auto *CopyFnPtrTy = PointerType::getUnqual(CopyFnTy);
 
-  auto *OutlinedFn = (Function *)M->getOrInsertFunction(
-      ".omp_outlined.", Type::getVoidTy(C), Type::getInt32Ty(C),
-      Type::getInt32PtrTy(C), Type::getInt8PtrTy(C), CopyFnPtrTy,
-      Type::getInt8PtrTy(C), SharedsPtrTy, nullptr);
+  auto *OutlinedFnTy = FunctionType::get(
+      Type::getVoidTy(C),
+      {Type::getInt32Ty(C), Type::getInt32PtrTy(C), Type::getInt8PtrTy(C),
+       CopyFnPtrTy, Type::getInt8PtrTy(C), SharedsPtrTy},
+      false);
+  auto *OutlinedFn = Function::Create(
+      OutlinedFnTy, GlobalValue::InternalLinkage, ".omp_outlined.", M);
+  // Twine OutlinedName = ForkedFn->getName() + ".omp_outlined.";
+  // auto *OutlinedFn = (Function *)M->getOrInsertFunction(
+  //     OutlinedName.str(), Type::getVoidTy(C), Type::getInt32Ty(C),
+  //     Type::getInt32PtrTy(C), Type::getInt8PtrTy(C), CopyFnPtrTy,
+  //     Type::getInt8PtrTy(C), SharedsPtrTy, nullptr);
   StringRef ArgNames[] = {".global_tid.", ".part_id.", ".privates.",
                           ".copy_fn.",    ".task_t.",  "__context"};
   int i = 0;
