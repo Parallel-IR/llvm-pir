@@ -17,6 +17,7 @@ enum OpenMPRuntimeFunction {
   OMPRTL__kmpc_omp_task_alloc,
   OMPRTL__kmpc_omp_task,
   OMPRTL__kmpc_omp_taskwait,
+  OMPRTL__kmpc_global_thread_num,
 };
 
 enum OpenMPSchedType {
@@ -40,11 +41,31 @@ public:
 private:
   /// Emits the outlined function corresponding to the parallel region.
   void emitRegionFunction(const ParallelRegion &PR);
+  void emitOMPRegionFn(Function *OMPRegionFn, LLVMContext &Context,
+                       Function *ForkedFn, Function *ContFn,
+                       const std::vector<Argument *> &ForkedFnArgs,
+                       const std::vector<Argument *> &ContFnArgs, bool Nested);
+  void replaceExtractedRegionFnCall(
+      CallInst *CI, Function *OMPRegionFn, ValueToValueMapTy &VMap,
+      Function *OMPNestedRegionFn, ValueToValueMapTy &NestedVMap,
+      Function *ForkedFn, std::vector<Argument *> &ForkedFnArgs,
+      std::vector<Argument *> &ForkedFnNestedArgs, Function *ContFn,
+      std::vector<Argument *> &ContFnArgs,
+      std::vector<Argument *> &ContFnNestedArgs);
   std::vector<Argument *> findCalledFnArgs(CallInst *ParentCall,
                                            Function *ChildFn,
                                            ValueToValueMapTy &VMap);
-  Function *createOMPRegionFn(Function *RegionFn, Module *Module,
-                              LLVMContext &Context);
+  void addRegionFnArgs(Function *RegionFn, Module *Module, LLVMContext &Context,
+                       std::vector<Type *> &FnParams,
+                       std::vector<StringRef> &FnArgNames,
+                       std::vector<AttributeSet> &FnArgAttrs, int ArgOffset);
+  Function *createRegionFn(Function *RegionFn, Module *Module,
+                           LLVMContext &Context, std::vector<Type *> &FnParams,
+                           std::vector<StringRef> &FnArgNames,
+                           std::vector<AttributeSet> &FnArgAttrs,
+                           const Twine &Name);
+  Function *createOMPRegionFn(Function *RegionFn, ValueToValueMapTy &VMap,
+                              bool Nested);
   /// Emits the outlined function corresponding to the parallel task (whehter
   /// forked or continuation).
   Function *emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
@@ -61,13 +82,16 @@ private:
   /// Emits the implicit args needed for an outlined OMP region function.
   DenseMap<Argument *, Value *> emitImplicitArgs(Function *OMPRegionFn,
                                                  IRBuilder<> &AllocaIRBuilder,
-                                                 IRBuilder<> &StoreIRBuilder);
+                                                 IRBuilder<> &StoreIRBuilder,
+                                                 bool Nested);
   /* void emitImplicitArgs(BasicBlock *PRFuncEntryBB); */
 
   void emitMasterRegion(Function *OMPRegionFn, IRBuilder<> &IRBuilder,
-                        llvm::IRBuilder<> &AllocaIRBuilder, Function *ForkedFn,Function *ContFn,
+                        llvm::IRBuilder<> &AllocaIRBuilder, Function *ForkedFn,
+                        Function *ContFn,
                         DenseMap<Argument *, Value *> ArgToAllocaMap,
-                        std::vector<Argument *> ForkedFnArgs, std::vector<Argument *> ContFnArgs);
+                        std::vector<Argument *> ForkedFnArgs,
+                        std::vector<Argument *> ContFnArgs, bool Nested);
   /* void emitMasterRegion(Function *F, const DataLayout &DL, Function
    * *ForkedFn, */
   /*                       Function *ContFn); */
@@ -77,7 +101,7 @@ private:
                       std::vector<Value *> LoadedCapturedArgs);
   StructType *createSharedsTy(Function *F);
   Function *emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
-                                  Type *SharedsPtrTy, Value *TaskFunction,
+                                  Type *SharedsPtrTy, Function *TaskFunction,
                                   Value *TaskPrivatesMap);
   Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy,
                                      Function *ForkedFn);
@@ -150,6 +174,13 @@ private:
   // Maps a funtion to the instruction where we loaded the thread id addrs
   typedef DenseMap<Function *, Value *> OpenMPThreadIDLoadMapTy;
   OpenMPThreadIDLoadMapTy OpenMPThreadIDLoadMap;
+  // Maps an extracted forked function (Using CodeExtractor) to its
+  // corresponding task outlined function as required by OMP runtime.
+  typedef DenseMap<Function *, Function *> ExtractedToOutlinedMapTy;
+  ExtractedToOutlinedMapTy ExtractedToOutlinedMap;
+  // Maps an outlined task function to its corresponding task entry function.
+  typedef DenseMap<Function *, Function *> OutlinedToEntryMapTy;
+  OutlinedToEntryMapTy OutlinedToEntryMap;
 
   BitCastInst *AllocaInsertPt = nullptr;
   IRBuilder<> *AllocaIRBuilder = nullptr;
