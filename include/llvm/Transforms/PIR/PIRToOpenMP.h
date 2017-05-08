@@ -6,6 +6,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 namespace llvm {
 enum OpenMPRuntimeFunction {
@@ -39,6 +40,9 @@ public:
 private:
   /// Emits the outlined function corresponding to the parallel region.
   void emitRegionFunction(const ParallelRegion &PR);
+  std::vector<Argument *> findCalledFnArgs(CallInst *ParentCall,
+                                           Function *ChildFn,
+                                           ValueToValueMapTy &VMap);
   Function *createOMPRegionFn(Function *RegionFn, Module *Module,
                               LLVMContext &Context);
   /// Emits the outlined function corresponding to the parallel task (whehter
@@ -55,16 +59,23 @@ private:
                             const Twine &Name, IRBuilder<> &IRBuilder) const;
 
   /// Emits the implicit args needed for an outlined OMP region function.
-  void emitImplicitArgs(Function *OMPRegionFn, IRBuilder<> &AllocaIRBuilder,
-                        IRBuilder<> &StoreIRBuilder);
+  DenseMap<Argument *, Value *> emitImplicitArgs(Function *OMPRegionFn,
+                                                 IRBuilder<> &AllocaIRBuilder,
+                                                 IRBuilder<> &StoreIRBuilder);
   /* void emitImplicitArgs(BasicBlock *PRFuncEntryBB); */
 
-  void emitMasterRegion(Function *OMPRegionFn, IRBuilder<> &IRBuilder);
+  void emitMasterRegion(Function *OMPRegionFn, IRBuilder<> &IRBuilder,
+                        llvm::IRBuilder<> &AllocaIRBuilder, Function *ForkedFn,Function *ContFn,
+                        DenseMap<Argument *, Value *> ArgToAllocaMap,
+                        std::vector<Argument *> ForkedFnArgs, std::vector<Argument *> ContFnArgs);
   /* void emitMasterRegion(Function *F, const DataLayout &DL, Function
    * *ForkedFn, */
   /*                       Function *ContFn); */
   Value *emitTaskInit(Module *M, Function *Caller, IRBuilder<> &CallerIRBuilder,
-                      const DataLayout &DL, Function *ForkedFn);
+                      IRBuilder<> &CallerAllocaIRBuilder, const DataLayout &DL,
+                      Function *ForkedFn,
+                      std::vector<Value *> LoadedCapturedArgs);
+  StructType *createSharedsTy(Function *F);
   Function *emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
                                   Type *SharedsPtrTy, Value *TaskFunction,
                                   Value *TaskPrivatesMap);
@@ -125,13 +136,13 @@ private:
   DenseMap<Argument *, Value *> startFunction(Function *Fn);
 
 private:
-  ParallelRegionInfo *PRI;
+  ParallelRegionInfo *PRI = nullptr;
 
-  StructType *IdentTy;
-  FunctionType *Kmpc_MicroTy;
-  Constant *DefaultOpenMPPSource;
-  Constant *DefaultOpenMPLocation;
-  PointerType *KmpRoutineEntryPtrTy;
+  StructType *IdentTy = nullptr;
+  FunctionType *Kmpc_MicroTy = nullptr;
+  Constant *DefaultOpenMPPSource = nullptr;
+  Constant *DefaultOpenMPLocation = nullptr;
+  PointerType *KmpRoutineEntryPtrTy = nullptr;
   // Maps a funtion representing an outlined top-level region to the alloca
   // instruction of its thread id.
   typedef DenseMap<Function *, Value *> OpenMPThreadIDAllocaMapTy;
@@ -140,9 +151,9 @@ private:
   typedef DenseMap<Function *, Value *> OpenMPThreadIDLoadMapTy;
   OpenMPThreadIDLoadMapTy OpenMPThreadIDLoadMap;
 
-  BitCastInst *AllocaInsertPt;
-  IRBuilder<> *AllocaIRBuilder;
-  IRBuilder<> *StoreIRBuilder;
+  BitCastInst *AllocaInsertPt = nullptr;
+  IRBuilder<> *AllocaIRBuilder = nullptr;
+  IRBuilder<> *StoreIRBuilder = nullptr;
 };
 
 class PIRToOMPPass : public PassInfoMixin<PIRToOMPPass> {

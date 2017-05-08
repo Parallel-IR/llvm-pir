@@ -109,16 +109,48 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
 
   CodeExtractor RegionExtractor(RegionBBs);
   Function *RegionFn = RegionExtractor.extractCodeRegion();
+
+  // Make sure that any value shared accross the parallel region bounds is a
+  // pointer not a primitive value.
+  for (auto *ParamTy : RegionFn->getFunctionType()->params()) {
+    assert(ParamTy->isPointerTy() &&
+           "Parallel regions must capture addresses not values!");
+  }
+
+  CodeExtractor ForkedExtractor(ForkedBBs);
+  Function *ForkedFn = ForkedExtractor.extractCodeRegion();
+  // The sub-set of RegionFn args that is passed to ForkedFn
+  std::vector<Argument *> ForkedFnArgs;
+  CodeExtractor ContExtractor(ContBBs);
+  Function *ContFn = ContExtractor.extractCodeRegion();
+  // The sub-set of RegionFn args that is passed to ContFn
+  std::vector<Argument *> ContFnArgs;
+
   auto *OMPRegionFn = createOMPRegionFn(RegionFn, Module, Context);
   std::vector<Value *> RegionFnCallArgs;
 
+  ValueToValueMapTy VMap;
+  // Skip the first 2 arguments (global_tid and bound_tid) ...
+  auto OMPArgIt = OMPRegionFn->arg_begin();
+  ++OMPArgIt;
+  ++OMPArgIt;
+  // ... then map corresponding arguments in RegionFn and OMPRegionFn
+  auto &RegionFnArgList = RegionFn->getArgumentList();
+
+  for (auto &Arg : RegionFnArgList) {
+    VMap[&Arg] = &*OMPArgIt;
+    ++OMPArgIt;
+  }
+
   for (auto &BB : *SpawningFn) {
     if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
+      // NOTE: I use pointer equality here, is that fine?
       if (RegionFn == CI->getCalledFunction()) {
         IRBuilder<> IRBuilder(CI);
         std::vector<Value *> OMPRegionFnArgs = {
             DefaultOpenMPLocation,
-            ConstantInt::getSigned(Type::getInt32Ty(Context), 0),
+            ConstantInt::getSigned(Type::getInt32Ty(Context),
+                                   RegionFn->arg_size()),
             IRBuilder.CreateBitCast(OMPRegionFn,
                                     getKmpc_MicroPointerTy(Context))};
 
@@ -134,24 +166,13 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
             OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, Module);
         emitRuntimeCall(ForkRTFn, OMPRegionFnArgs, "", IRBuilder);
 
+        ForkedFnArgs = findCalledFnArgs(CI, ForkedFn, VMap);
+        ContFnArgs = findCalledFnArgs(CI, ContFn, VMap);
         CI->eraseFromParent();
 
         break;
       }
     }
-  }
-
-  ValueToValueMapTy VMap;
-  // Skip the first 2 arguments (global_tid and bound_tid) ...
-  auto OMPArgIt = OMPRegionFn->arg_begin();
-  ++OMPArgIt;
-  ++OMPArgIt;
-  // ... then map corresponding arguments in RegionFn and OMPRegionFn
-  auto &RegionFnArgList = RegionFn->getArgumentList();
-
-  for (auto &Arg : RegionFnArgList) {
-    VMap[&Arg] = &*OMPArgIt;
-    ++OMPArgIt;
   }
 
   auto *EntryBB = BasicBlock::Create(Context, "entry", OMPRegionFn, nullptr);
@@ -162,27 +183,85 @@ void PIRToOpenMPPass::emitRegionFunction(const ParallelRegion &PR) {
                               ((Instruction *)AllocaInsertPt)->getIterator());
 
   IRBuilder<> StoreIRBuilder(EntryBB);
-  emitImplicitArgs(OMPRegionFn, AllocaIRBuilder, StoreIRBuilder);
-  emitMasterRegion(OMPRegionFn, StoreIRBuilder);
+  auto ParamToAllocaMap =
+      emitImplicitArgs(OMPRegionFn, AllocaIRBuilder, StoreIRBuilder);
+
+  emitMasterRegion(OMPRegionFn, StoreIRBuilder, AllocaIRBuilder, ForkedFn,
+                   ContFn, ParamToAllocaMap, ForkedFnArgs, ContFnArgs);
   StoreIRBuilder.CreateRetVoid();
 
   AllocaInsertPt->eraseFromParent();
+}
 
-  OMPRegionFn->dump();
+// This function assumes the following:
+//   1 - ParentCall->getCalledFunction() was extracted using CodeExtractor.
+//   2 - ParentCall->getCalledFunction() had a list of BBs inside its extracted
+//   body which were extracted using CodeExtractor which in turn replaced these
+//   BBs with a call to the extracted function ChildFn.
+//
+// It returns a sub-list of ParentCall->getCalledFunction()'s arguments that
+// ChildFn should be passed.
+// TODO add example.
+std::vector<Argument *>
+PIRToOpenMPPass::findCalledFnArgs(CallInst *ParentCall, Function *ChildFn,
+                                  ValueToValueMapTy &VMap) {
+  auto *ParentFn = ParentCall->getCalledFunction();
+  std::vector<Argument *> FilteredArgs;
+
+  // Locate the CallInst to ChildFn
+  for (auto &BB : *ParentFn) {
+    if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
+      if (ChildFn == CI->getCalledFunction()) {
+        auto ChildArgIt = CI->arg_begin();
+
+        while (ChildArgIt != CI->arg_end()) {
+          for (auto &Arg : ParentFn->args()) {
+            if (ChildArgIt->get() == &Arg) {
+              FilteredArgs.push_back(dyn_cast<Argument>(VMap[&Arg]));
+              break;
+            }
+          }
+
+          ++ChildArgIt;
+        }
+
+        break;
+      }
+    }
+  }
+
+  return FilteredArgs;
 }
 
 Function *PIRToOpenMPPass::createOMPRegionFn(Function *RegionFn, Module *Module,
                                              LLVMContext &Context) {
+  DataLayout DL(Module);
+
   std::vector<Type *> FnParams = {
       PointerType::getUnqual(Type::getInt32Ty(Context)),
       PointerType::getUnqual(Type::getInt32Ty(Context))};
   std::vector<StringRef> FnArgNames = {".global_tid.", ".bound_tid."};
+  std::vector<AttributeSet> FnArgAttrs = {
+      AttributeSet::get(Context, 1, Attribute::NoAlias),
+      AttributeSet::get(Context, 2, Attribute::NoAlias)};
 
   auto &RegionFnArgList = RegionFn->getArgumentList();
+  int i = 2;
 
   for (auto &Arg : RegionFnArgList) {
+    assert(Arg.getType()->isPointerTy() &&
+           "Parallel regions must capture addresses not values!");
+
     FnParams.push_back(Arg.getType());
     FnArgNames.push_back(Arg.getName());
+
+    // Allow speculative loading from shared data.
+    // NOTE: check https://www.cs.nmsu.edu/~rvinyard/itanium/speculation.htm
+    // for more info on speculation
+    AttrBuilder B;
+    B.addDereferenceableAttr(
+        DL.getTypeAllocSize(Arg.getType()->getPointerElementType()));
+    FnArgAttrs.push_back(AttributeSet::get(Context, ++i, B));
   }
 
   auto *OMPRegionFnTy =
@@ -193,15 +272,11 @@ Function *PIRToOpenMPPass::createOMPRegionFn(Function *RegionFn, Module *Module,
       Module->getOrInsertFunction(OMPRegionFnName.str(), OMPRegionFnTy));
   auto &FnArgList = OMPRegionFn->getArgumentList();
 
-  int i = 0;
+  i = 0;
   for (auto &Arg : FnArgList) {
     Arg.setName(FnArgNames[i]);
     ++i;
   }
-
-  std::vector<AttributeSet> FnArgAttrs = {
-      AttributeSet::get(Context, 1, Attribute::NoAlias),
-      AttributeSet::get(Context, 2, Attribute::NoAlias)};
 
   auto ArgIt = FnArgList.begin();
 
@@ -340,12 +415,14 @@ CallInst *PIRToOpenMPPass::emitRuntimeCall(Value *Callee,
   return call;
 }
 
-void PIRToOpenMPPass::emitImplicitArgs(Function *OMPRegionFn,
-                                       IRBuilder<> &AllocaIRBuilder,
-                                       IRBuilder<> &StoreIRBuilder) {
+DenseMap<Argument *, Value *>
+PIRToOpenMPPass::emitImplicitArgs(Function *OMPRegionFn,
+                                  IRBuilder<> &AllocaIRBuilder,
+                                  IRBuilder<> &StoreIRBuilder) {
   // NOTE check clang's CodeGenFunction::EmitFunctionProlog for a general
   // handling of function prologue emition
   DataLayout DL(OMPRegionFn->getParent());
+  DenseMap<Argument *, Value *> ParamToAllocaMap;
 
   // NOTE according to the docs in CodeGenFunction.h, it is preferable
   // to insert all alloca's at the start of the entry BB. But I am not
@@ -360,6 +437,7 @@ void PIRToOpenMPPass::emitImplicitArgs(Function *OMPRegionFn,
     Alloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
     StoreIRBuilder.CreateAlignedStore(&Arg, Alloca,
                                       DL.getTypeAllocSize(Arg.getType()));
+
     return (Value *)Alloca;
   };
 
@@ -372,17 +450,58 @@ void PIRToOpenMPPass::emitImplicitArgs(Function *OMPRegionFn,
   Elem.second = GtidAlloca;
   ++ArgI;
 
+  emitArgProlog(*ArgI);
+  ++ArgI;
+
   while (ArgI != ArgList.end()) {
-    emitArgProlog(*ArgI);
+    auto *Alloca = emitArgProlog(*ArgI);
+    auto &ArgToAllocaIt = ParamToAllocaMap.FindAndConstruct(&*ArgI);
+    ArgToAllocaIt.second = Alloca;
     ++ArgI;
   }
+
+  return ParamToAllocaMap;
 }
 
-void PIRToOpenMPPass::emitMasterRegion(Function *OMPRegionFn,
-                                       IRBuilder<> &IRBuilder) {
+void PIRToOpenMPPass::emitMasterRegion(
+    Function *OMPRegionFn, IRBuilder<> &IRBuilder,
+    ::IRBuilder<> &AllocaIRBuilder, Function *ForkedFn, Function *ContFn,
+    DenseMap<Argument *, Value *> ParamToAllocaMap,
+    std::vector<Argument *> ForkedFnArgs, std::vector<Argument *> ContFnArgs) {
   Module *M = OMPRegionFn->getParent();
   LLVMContext &C = OMPRegionFn->getContext();
   DataLayout DL(OMPRegionFn->getParent());
+
+  auto CapturedArgIt = ParamToAllocaMap.begin();
+  std::vector<Value *> ForkedCapArgsLoads;
+  std::vector<Value *> ContCapArgsLoads;
+
+  while (CapturedArgIt != ParamToAllocaMap.end()) {
+    auto *CapturedArgLoad = IRBuilder.CreateAlignedLoad(
+        CapturedArgIt->second,
+        DL.getTypeAllocSize(
+            CapturedArgIt->second->getType()->getPointerElementType()));
+
+    auto PrepareLoadsVec = [&CapturedArgIt, &CapturedArgLoad](
+                               const std::vector<Argument *> &FnArgs,
+                               std::vector<Value *> &FnArgLoads) {
+      auto ArgIt =
+          std::find(FnArgs.begin(), FnArgs.end(), CapturedArgIt->first);
+      if (ArgIt != FnArgs.end()) {
+        auto Dist = std::distance(FnArgs.begin(), ArgIt);
+        if (FnArgLoads.size() <= Dist) {
+          FnArgLoads.resize(Dist + 1);
+        }
+        FnArgLoads[Dist] = CapturedArgLoad;
+      }
+    };
+
+    PrepareLoadsVec(ForkedFnArgs, ForkedCapArgsLoads);
+    PrepareLoadsVec(ContFnArgs, ContCapArgsLoads);
+
+    ++CapturedArgIt;
+  }
+
   ArrayRef<Value *> MasterArgs = {DefaultOpenMPLocation,
                                   getThreadID(OMPRegionFn, IRBuilder)};
   auto MasterRTFn =
@@ -398,14 +517,15 @@ void PIRToOpenMPPass::emitMasterRegion(Function *OMPRegionFn,
 
   IRBuilder.SetInsertPoint(IfThenBB);
 
-  // auto *NewTask = emitTaskInit(M, F, *StoreIRBuilder, DL, ForkedFn);
-  // ArrayRef<Value *> TaskArgs = {DefaultOpenMPLocation, getThreadID(F, DL),
-  // NewTask};
-  // emitRuntimeCall(
-  // createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task, M),
-  // TaskArgs, "", *StoreIRBuilder);
+  auto *NewTask = emitTaskInit(M, OMPRegionFn, IRBuilder, AllocaIRBuilder, DL,
+                               ForkedFn, ForkedCapArgsLoads);
+  ArrayRef<Value *> TaskArgs = {DefaultOpenMPLocation,
+                                getThreadID(OMPRegionFn, IRBuilder), NewTask};
+  emitRuntimeCall(
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task, M),
+      TaskArgs, "", IRBuilder);
 
-  // StoreIRBuilder->CreateCall(ContFn);
+  IRBuilder.CreateCall(ContFn, ContCapArgsLoads);
 
   emitTaskwaitCall(OMPRegionFn, IRBuilder, DL);
   auto EndMasterRTFn =
@@ -419,9 +539,11 @@ void PIRToOpenMPPass::emitMasterRegion(Function *OMPRegionFn,
 // task
 Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
                                      IRBuilder<> &CallerIRBuilder,
-                                     const DataLayout &DL, Function *ForkedFn) {
+                                     IRBuilder<> &CallerAllocaIRBuilder,
+                                     const DataLayout &DL, Function *ForkedFn,
+                                     std::vector<Value *> LoadedCapturedArgs) {
   LLVMContext &C = M->getContext();
-  auto *SharedsTy = StructType::create("anon", Type::getInt8Ty(C), nullptr);
+  auto *SharedsTy = createSharedsTy(ForkedFn);
   auto *SharedsPtrTy = PointerType::getUnqual(SharedsTy);
   auto *SharedsTySize =
       CallerIRBuilder.getInt64(DL.getTypeAllocSize(SharedsTy));
@@ -441,6 +563,20 @@ Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
   auto *TaskEntry = emitProxyTaskFunction(
       M, KmpTaskTWithPrivatesPtrTy, SharedsPtrTy, OutlinedFn, TaskPrivatesMap);
 
+  // Allocate space to store the captured environment
+  auto *AggCaptured =
+      CallerAllocaIRBuilder.CreateAlloca(SharedsTy, nullptr, "agg.captured");
+
+  // Store captured arguments into agg.captured
+  for (unsigned i = 0; i < LoadedCapturedArgs.size(); ++i) {
+    auto *AggCapturedElemPtr = CallerIRBuilder.CreateInBoundsGEP(
+        SharedsTy, AggCaptured,
+        {CallerIRBuilder.getInt32(0), CallerIRBuilder.getInt32(i)});
+    CallerIRBuilder.CreateAlignedStore(
+        LoadedCapturedArgs[i], AggCapturedElemPtr,
+        DL.getTypeAllocSize(LoadedCapturedArgs[i]->getType()));
+  }
+
   // NOTE check CGOpenMPRuntime::emitTaskInit for the complete set of task
   // flags. We only need tied tasks for now and that's what the 1 value is for.
   auto *TaskFlags = CallerIRBuilder.getInt32(1);
@@ -456,7 +592,39 @@ Value *PIRToOpenMPPass::emitTaskInit(Module *M, Function *Caller,
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task_alloc,
                             Caller->getParent()),
       AllocArgs, "", CallerIRBuilder);
+  auto *NewTaskNewTaskTTy = CallerIRBuilder.CreatePointerBitCastOrAddrSpaceCast(
+      NewTask, KmpTaskTWithPrivatesPtrTy);
+  // NOTE: here I diverge from the code generation sequence in OMP clang. See
+  // the corresponding function for more details.
+  auto *KmpTaskTPtr = CallerIRBuilder.CreateInBoundsGEP(
+      KmpTaskTWithPrivatesTy, NewTaskNewTaskTTy,
+      {CallerIRBuilder.getInt32(0), CallerIRBuilder.getInt32(0)});
+  auto *KmpTaskDataPtr = CallerIRBuilder.CreateInBoundsGEP(
+      KmpTaskTTy, KmpTaskTPtr,
+      {CallerIRBuilder.getInt32(0), CallerIRBuilder.getInt32(0)});
+  auto *KmpTaskData = CallerIRBuilder.CreateAlignedLoad(
+      KmpTaskDataPtr,
+      DL.getTypeAllocSize(KmpTaskDataPtr->getType()->getPointerElementType()));
+  auto *AggCapturedToI8 = CallerIRBuilder.CreatePointerBitCastOrAddrSpaceCast(
+      AggCaptured, Type::getInt8PtrTy(C));
+  CallerIRBuilder.CreateMemCpy(
+      KmpTaskData, AggCapturedToI8,
+      CallerIRBuilder.getInt64(DL.getTypeAllocSize(SharedsTy)), 8);
+
   return NewTask;
+}
+
+// Creates a struct that contains elements corresponding to the arguments
+// of F.
+StructType *PIRToOpenMPPass::createSharedsTy(Function *F) {
+  LLVMContext &C = F->getParent()->getContext();
+  auto FnParams = F->getFunctionType()->params();
+
+  if (FnParams.size() == 0) {
+    return StructType::create("anon", Type::getInt8Ty(C), nullptr);
+  }
+
+  return StructType::create(FnParams, "anon");
 }
 
 // Emits some boilerplate code to kick off the task work and then calls the
@@ -552,17 +720,33 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
   OutlinedFn->addFnAttr(Attribute::NoUnwind);
   OutlinedFn->addFnAttr(Attribute::UWTable);
 
-  auto ArgToAllocaMap = startFunction(OutlinedFn);
+  auto ParamToAllocaMap = startFunction(OutlinedFn);
   auto *ContextArg = &*std::prev(OutlinedFn->args().end());
-  auto It = ArgToAllocaMap.find(ContextArg);
-  assert(It != ArgToAllocaMap.end() && "Argument entry wasn't found");
+  auto It = ParamToAllocaMap.find(ContextArg);
+  assert(It != ParamToAllocaMap.end() && "Argument entry wasn't found");
   auto *ContextAddr = It->second;
   auto *EntryBB = &*OutlinedFn->begin();
   IRBuilder<> IRBuilder(EntryBB->getTerminator());
-  IRBuilder.CreateAlignedLoad(
+
+  // Load the context struct so that we can access the task's accessed data
+  auto *Context = IRBuilder.CreateAlignedLoad(
       ContextAddr,
       DL.getTypeAllocSize(ContextAddr->getType()->getPointerElementType()));
-  IRBuilder.CreateCall(ForkedFn);
+
+  std::vector<Value *> ForkedFnArgs;
+  for (unsigned i = 0; i < ForkedFn->getFunctionType()->getNumParams(); ++i) {
+    auto *DataAddrEP = IRBuilder.CreateInBoundsGEP(
+        Context, {IRBuilder.getInt32(0), IRBuilder.getInt32(i)});
+    auto *DataAddr = IRBuilder.CreateAlignedLoad(
+        DataAddrEP,
+        DL.getTypeAllocSize(DataAddrEP->getType()->getPointerElementType()));
+    // auto *Data = IRBuilder.CreateAlignedLoad(
+    //     DataAddr,
+    //     DL.getTypeAllocSize(DataAddr->getType()->getPointerElementType()));
+    ForkedFnArgs.push_back(DataAddr);
+  }
+
+  IRBuilder.CreateCall(ForkedFn, ForkedFnArgs);
 
   return OutlinedFn;
 }
@@ -570,7 +754,8 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
 void PIRToOpenMPPass::emitTaskwaitCall(Function *Caller,
                                        IRBuilder<> &CallerIRBuilder,
                                        const DataLayout &DL) {
-  ArrayRef<Value *> Args = {DefaultOpenMPLocation, getThreadID(Caller, CallerIRBuilder)};
+  ArrayRef<Value *> Args = {DefaultOpenMPLocation,
+                            getThreadID(Caller, CallerIRBuilder)};
   emitRuntimeCall(
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_taskwait,
                             Caller->getParent()),
@@ -731,7 +916,8 @@ void PIRToOpenMPPass::emitForStaticFinish(Function *F, const DataLayout &DL) {
 
 // By the end of emitBlock the IRBuilder will be positioned at the start
 // BB
-void PIRToOpenMPPass::emitBlock(Function *F, IRBuilder<> &IRBuilder, BasicBlock *BB, bool IsFinished) {
+void PIRToOpenMPPass::emitBlock(Function *F, IRBuilder<> &IRBuilder,
+                                BasicBlock *BB, bool IsFinished) {
   auto *CurBB = IRBuilder.GetInsertBlock();
   emitBranch(BB, IRBuilder);
 
@@ -801,7 +987,7 @@ Value *PIRToOpenMPPass::getThreadID(Function *F, IRBuilder<> &IRBuilder) {
   // be emitted instead; since there is no implicit argument representing
   // the thread ID.
   return nullptr;
-  }
+}
 
 Value *PIRToOpenMPPass::getThreadID(Function *F) {
   LoadInst *ThreadID = nullptr;
@@ -831,9 +1017,8 @@ Type *PIRToOpenMPPass::getOrCreateIdentTy(Module *M) {
   return IdentTy;
 }
 
-Type *
-PIRToOpenMPPass::createKmpTaskTTy(Module *M,
-                                  PointerType *KmpRoutineEntryPointerQTy) {
+Type *PIRToOpenMPPass::createKmpTaskTTy(Module *M,
+                                        PointerType *KmpRoutineEntryPtrTy) {
   auto &C = M->getContext();
   auto *KmpCmplrdataTy =
       StructType::create("kmp_cmplrdata_t", KmpRoutineEntryPtrTy, nullptr);
@@ -865,7 +1050,7 @@ DenseMap<Argument *, Value *> PIRToOpenMPPass::startFunction(Function *Fn) {
   auto *M = Fn->getParent();
   auto &C = M->getContext();
   DataLayout DL(M);
-  DenseMap<Argument *, Value *> ArgToAllocaMap;
+  DenseMap<Argument *, Value *> ParamToAllocaMap;
   auto *EntryBB = BasicBlock::Create(C, "entry", Fn, nullptr);
   IRBuilder<> IRBuilder(EntryBB);
   auto *RetTy = Fn->getReturnType();
@@ -883,7 +1068,7 @@ DenseMap<Argument *, Value *> PIRToOpenMPPass::startFunction(Function *Fn) {
         IRBuilder.CreateAlloca(Arg.getType(), nullptr, Arg.getName() + ".addr");
     ArgAlloca->setAlignment(DL.getTypeAllocSize(Arg.getType()));
     *ArgAllocaIt = ArgAlloca;
-    auto &ArgToAllocaIt = ArgToAllocaMap.FindAndConstruct(&Arg);
+    auto &ArgToAllocaIt = ParamToAllocaMap.FindAndConstruct(&Arg);
     ArgToAllocaIt.second = ArgAlloca;
     ++ArgAllocaIt;
   }
@@ -903,7 +1088,7 @@ DenseMap<Argument *, Value *> PIRToOpenMPPass::startFunction(Function *Fn) {
     IRBuilder.CreateRet(RetVal);
   }
 
-  return ArgToAllocaMap;
+  return ParamToAllocaMap;
 }
 
 PointerType *PIRToOpenMPPass::getIdentTyPointerTy() const {
