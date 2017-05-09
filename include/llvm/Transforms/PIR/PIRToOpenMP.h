@@ -1,3 +1,62 @@
+//===-- llvm/PIRToOpenMP.h - Instruction class definition -------*- C++ -*-===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+///
+/// \file
+/// This file contains the declaration of PIRToOpenMPPass class, which
+/// implements OpenMP backend code generation for Parallel IR (PIR).
+///
+/// This pass extracts parallel regions and child parallel tasks into outlined
+/// functions. Inside these outlined functions, the required OpenMP structs
+/// are created and called as required by the OpenMP runtime to implement
+/// task-based parallelism.
+///
+/// Example:
+/// ========
+/// For the following parallel region:
+///   ...
+///   fork label %forked, %cont
+///
+/// forked:
+///   call void @foo()
+///   halt label %cont
+///
+/// cont:
+///   call void @bar()
+///   join label %join
+///
+/// join:
+/// ...
+///
+/// , this pass generates the OpenMP runtime code equivalent to the following
+/// C code:
+/// ...
+/// if (omp_get_num_threads() == 1) {
+///   #pragma omp parallel
+///   {
+///     #pragma omp master
+///     {
+///       #pragma omp task
+///       { foo(); }
+///       bar();
+///       #pragma omp taskwait
+///     }
+///   }
+/// } else {
+///       #pragma omp task
+///       { foo(); }
+///       bar();
+///       #pragma omp taskwait
+/// }
+/// ...
+///
+//===----------------------------------------------------------------------===//
+
 #ifndef LLVM_TRANSFORMS_PIR_PIRTOOPENMP_H
 #define LLVM_TRANSFORMS_PIR_PIRTOOPENMP_H
 
@@ -28,9 +87,7 @@ class PIRToOpenMPPass : public FunctionPass {
 public:
   static char ID;
 
-  PIRToOpenMPPass()
-      : FunctionPass(ID), PRI(nullptr), IdentTy(nullptr), Kmpc_MicroTy(nullptr),
-        DefaultOpenMPPSource(nullptr), DefaultOpenMPLocation(nullptr) {}
+  PIRToOpenMPPass() : FunctionPass(ID) {}
 
   bool runOnFunction(Function &F) override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
@@ -39,36 +96,18 @@ public:
   void dump() const;
 
 private:
-  /// Emits the outlined function corresponding to the parallel region.
-  void emitRegionFunction(const ParallelRegion &PR);
-  void emitOMPRegionFn(Function *OMPRegionFn, LLVMContext &Context,
-                       Function *ForkedFn, Function *ContFn,
+  void startRegionEmission(const ParallelRegion &PR);
+
+  Function *declareOMPRegionFn(Function *RegionFn, bool Nested,
+                               ValueToValueMapTy &VMap);
+
+  void replaceExtractedRegionFnCall(CallInst *CI, Function *OMPRegionFn,
+                                    Function *OMPNestedRegionFn);
+
+  void emitOMPRegionFn(Function *OMPRegionFn, Function *ForkedFn,
+                       Function *ContFn,
                        const std::vector<Argument *> &ForkedFnArgs,
                        const std::vector<Argument *> &ContFnArgs, bool Nested);
-  void replaceExtractedRegionFnCall(
-      CallInst *CI, Function *OMPRegionFn, ValueToValueMapTy &VMap,
-      Function *OMPNestedRegionFn, ValueToValueMapTy &NestedVMap,
-      Function *ForkedFn, std::vector<Argument *> &ForkedFnArgs,
-      std::vector<Argument *> &ForkedFnNestedArgs, Function *ContFn,
-      std::vector<Argument *> &ContFnArgs,
-      std::vector<Argument *> &ContFnNestedArgs);
-  std::vector<Argument *> findCalledFnArgs(CallInst *ParentCall,
-                                           Function *ChildFn,
-                                           ValueToValueMapTy &VMap);
-  void addRegionFnArgs(Function *RegionFn, Module *Module, LLVMContext &Context,
-                       std::vector<Type *> &FnParams,
-                       std::vector<StringRef> &FnArgNames,
-                       std::vector<AttributeSet> &FnArgAttrs, int ArgOffset);
-  Function *createRegionFn(Function *RegionFn, Module *Module,
-                           LLVMContext &Context, std::vector<Type *> &FnParams,
-                           std::vector<StringRef> &FnArgNames,
-                           std::vector<AttributeSet> &FnArgAttrs,
-                           const Twine &Name);
-  Function *createOMPRegionFn(Function *RegionFn, ValueToValueMapTy &VMap,
-                              bool Nested);
-  /// Emits the outlined function corresponding to the parallel task (whehter
-  /// forked or continuation).
-  Function *emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
 
   /// Emits declaration of some OMP runtime functions.
   Constant *createRuntimeFunction(OpenMPRuntimeFunction Function, Module *M);
@@ -86,63 +125,55 @@ private:
                                                  bool Nested);
   /* void emitImplicitArgs(BasicBlock *PRFuncEntryBB); */
 
-  void emitMasterRegion(Function *OMPRegionFn, IRBuilder<> &IRBuilder,
-                        llvm::IRBuilder<> &AllocaIRBuilder, Function *ForkedFn,
-                        Function *ContFn,
-                        DenseMap<Argument *, Value *> ArgToAllocaMap,
-                        std::vector<Argument *> ForkedFnArgs,
-                        std::vector<Argument *> ContFnArgs, bool Nested);
-  /* void emitMasterRegion(Function *F, const DataLayout &DL, Function
-   * *ForkedFn, */
-  /*                       Function *ContFn); */
-  Value *emitTaskInit(Module *M, Function *Caller, IRBuilder<> &CallerIRBuilder,
-                      IRBuilder<> &CallerAllocaIRBuilder, const DataLayout &DL,
-                      Function *ForkedFn,
+  void emitOMPRegionLogic(Function *OMPRegionFn, IRBuilder<> &IRBuilder,
+                          llvm::IRBuilder<> &AllocaIRBuilder,
+                          Function *ForkedFn, Function *ContFn,
+                          DenseMap<Argument *, Value *> ArgToAllocaMap,
+                          std::vector<Argument *> ForkedFnArgs,
+                          std::vector<Argument *> ContFnArgs, bool Nested);
+
+  Value *emitTaskInit(Function *Caller, IRBuilder<> &CallerIRBuilder,
+                      IRBuilder<> &CallerAllocaIRBuilder, Function *ForkedFn,
                       std::vector<Value *> LoadedCapturedArgs);
+
   StructType *createSharedsTy(Function *F);
-  Function *emitProxyTaskFunction(Module *M, Type *KmpTaskTWithPrivatesPtrTy,
+  Function *emitProxyTaskFunction(Type *KmpTaskTWithPrivatesPtrTy,
                                   Type *SharedsPtrTy, Function *TaskFunction,
                                   Value *TaskPrivatesMap);
   Function *emitTaskOutlinedFunction(Module *M, Type *SharedsPtrTy,
                                      Function *ForkedFn);
   void emitTaskwaitCall(Function *Caller, IRBuilder<> &CallerIRBuilder,
                         const DataLayout &DL);
-  /// Emits code needed to express the semantics of a sections construct
+
   void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
                     Function *ForkedFn, Function *ContFn);
-  /// Emits code for variables needed by the sections loop.
+
   AllocaInst *createSectionVal(Type *Ty, const Twine &Name,
                                const DataLayout &DL, Value *Init = nullptr);
 
-  /// Emits declaration code for OMP __kmpc_for_static_init.
   Constant *createForStaticInitFunction(Module *M, unsigned IVSize,
                                         bool IVSigned);
-  /// Emits the cond code for the sections construct loop.
+
   void emitForLoopCond(const DataLayout &DL, Value *IV, Value *UB,
                        BasicBlock *Body, BasicBlock *Exit);
-  /// Manages the code emition for all parts of the sections loop.
+
   void emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout &DL,
                         Value *IV, Value *UB,
                         const function_ref<void()> &BodyGen);
-  /// Emits code for loop increment logic.
+
   void emitForLoopInc(Value *IV, const DataLayout &DL);
-  /// Calls the __kmpc_for_static_fini runtime function to tell it that
-  /// the parallel loop is done.
+
   void emitForStaticFinish(Function *F, const DataLayout &DL);
 
-  /// A helper to emit a basic block and transform the builder insertion
-  /// point to its start.
   void emitBlock(Function *F, IRBuilder<> &IRBuilder, BasicBlock *BB,
                  bool IsFinished = false);
-  /// A helper to emit a branch to a BB.
+
   void emitBranch(BasicBlock *Target, IRBuilder<> &IRBuilder);
-  /// Creates an aligned load.
+
   Value *emitAlignedLoad(Value *Addr, const DataLayout &DL);
-  /// Creates an aligned store.
+
   void emitAlignedStore(Value *Val, Value *Addr, const DataLayout &DL);
 
-  /// Emits code to load the value of the thread ID variable of a parallel
-  /// thread.
   Value *getThreadID(Function *F);
   Value *getThreadID(Function *F, IRBuilder<> &IRBuilder);
 
@@ -158,6 +189,8 @@ private:
   void emitKmpRoutineEntryT(Module *M);
 
   DenseMap<Argument *, Value *> startFunction(Function *Fn);
+
+  Function *emitTaskFunction(const ParallelRegion &PR, bool IsForked) const;
 
 private:
   ParallelRegionInfo *PRI = nullptr;
