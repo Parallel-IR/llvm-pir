@@ -145,34 +145,10 @@ private:
   void emitTaskwaitCall(Function *Caller, IRBuilder<> &CallerIRBuilder,
                         const DataLayout &DL);
 
-  void emitSections(Function *F, LLVMContext &C, const DataLayout &DL,
-                    Function *ForkedFn, Function *ContFn);
-
-  AllocaInst *createSectionVal(Type *Ty, const Twine &Name,
-                               const DataLayout &DL, Value *Init = nullptr);
-
-  Constant *createForStaticInitFunction(Module *M, unsigned IVSize,
-                                        bool IVSigned);
-
-  void emitForLoopCond(const DataLayout &DL, Value *IV, Value *UB,
-                       BasicBlock *Body, BasicBlock *Exit);
-
-  void emitOMPInnerLoop(Function *F, LLVMContext &C, const DataLayout &DL,
-                        Value *IV, Value *UB,
-                        const function_ref<void()> &BodyGen);
-
-  void emitForLoopInc(Value *IV, const DataLayout &DL);
-
-  void emitForStaticFinish(Function *F, const DataLayout &DL);
-
-  void emitBlock(Function *F, IRBuilder<> &IRBuilder, BasicBlock *BB,
+   void emitBlock(Function *F, IRBuilder<> &IRBuilder, BasicBlock *BB,
                  bool IsFinished = false);
 
   void emitBranch(BasicBlock *Target, IRBuilder<> &IRBuilder);
-
-  Value *emitAlignedLoad(Value *Addr, const DataLayout &DL);
-
-  void emitAlignedStore(Value *Val, Value *Addr, const DataLayout &DL);
 
   Value *getThreadID(Function *F);
   Value *getThreadID(Function *F, IRBuilder<> &IRBuilder);
@@ -214,10 +190,6 @@ private:
   // Maps an outlined task function to its corresponding task entry function.
   typedef DenseMap<Function *, Function *> OutlinedToEntryMapTy;
   OutlinedToEntryMapTy OutlinedToEntryMap;
-
-  BitCastInst *AllocaInsertPt = nullptr;
-  IRBuilder<> *AllocaIRBuilder = nullptr;
-  IRBuilder<> *StoreIRBuilder = nullptr;
 };
 
 class PIRToOMPPass : public PassInfoMixin<PIRToOMPPass> {
