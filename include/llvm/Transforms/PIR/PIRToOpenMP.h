@@ -176,6 +176,7 @@ private:
   Constant *DefaultOpenMPPSource = nullptr;
   Constant *DefaultOpenMPLocation = nullptr;
   PointerType *KmpRoutineEntryPtrTy = nullptr;
+
   // Maps a funtion representing an outlined top-level region to the alloca
   // instruction of its thread id.
   typedef DenseMap<Function *, Value *> OpenMPThreadIDAllocaMapTy;
@@ -183,10 +184,12 @@ private:
   // Maps a funtion to the instruction where we loaded the thread id addrs
   typedef DenseMap<Function *, Value *> OpenMPThreadIDLoadMapTy;
   OpenMPThreadIDLoadMapTy OpenMPThreadIDLoadMap;
+
   // Maps an extracted forked function (Using CodeExtractor) to its
   // corresponding task outlined function as required by OMP runtime.
   typedef DenseMap<Function *, Function *> ExtractedToOutlinedMapTy;
   ExtractedToOutlinedMapTy ExtractedToOutlinedMap;
+
   // Maps an outlined task function to its corresponding task entry function.
   typedef DenseMap<Function *, Function *> OutlinedToEntryMapTy;
   OutlinedToEntryMapTy OutlinedToEntryMap;

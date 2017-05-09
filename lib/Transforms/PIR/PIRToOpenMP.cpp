@@ -239,8 +239,9 @@ Function *PIRToOpenMPPass::declareOMPRegionFn(Function *RegionFn, bool Nested,
 
   if (!Nested) {
     // OMP parallel regions require some implicit arguments. Add them.
-    FnParams.push_back(PointerType::getUnqual(Type::getInt32Ty(Context)));
-    FnParams.push_back(PointerType::getUnqual(Type::getInt32Ty(Context)));
+    auto *Int32PtrTy = PointerType::getUnqual(Type::getInt32Ty(Context));
+    FnParams.push_back(Int32PtrTy);
+    FnParams.push_back(Int32PtrTy);
 
     FnArgNames.push_back(".global_tid.");
     FnArgNames.push_back(".bound_tid.");
@@ -268,8 +269,8 @@ Function *PIRToOpenMPPass::declareOMPRegionFn(Function *RegionFn, bool Nested,
   }
 
   // Create the function and set its argument properties.
-  auto *OMPRegionFnTy =
-      FunctionType::get(Type::getVoidTy(Context), FnParams, false);
+  auto *VoidTy = Type::getVoidTy(Context);
+  auto *OMPRegionFnTy = FunctionType::get(VoidTy, FnParams, false);
   auto Name = RegionFn->getName() + (Nested ? ".Nested.OMP" : ".OMP");
   Function *OMPRegionFn = dyn_cast<Function>(
       Module->getOrInsertFunction(Name.str(), OMPRegionFnTy));
@@ -318,9 +319,10 @@ void PIRToOpenMPPass::replaceExtractedRegionFnCall(
 
   IRBuilder<> IRBuilder(CI);
   // For outer regions, pass some parameters required by OMP runtime.
+  auto *Int32Ty = Type::getInt32Ty(Context);
   std::vector<Value *> OMPRegionFnArgs = {
       DefaultOpenMPLocation,
-      ConstantInt::getSigned(Type::getInt32Ty(Context), RegionFn->arg_size()),
+      ConstantInt::getSigned(Int32Ty, RegionFn->arg_size()),
       IRBuilder.CreateBitCast(OMPRegionFn, getKmpc_MicroPointerTy(Context))};
 
   std::vector<Value *> OMPNestedRegionFnArgs;
@@ -343,8 +345,7 @@ void PIRToOpenMPPass::replaceExtractedRegionFnCall(
   //   call OMPNestedRegionFn
   // }
   auto *GetNumThreadsFn = Module->getOrInsertFunction(
-      "omp_get_num_threads",
-      FunctionType::get(Type::getInt32Ty(Context), false));
+      "omp_get_num_threads", FunctionType::get(Int32Ty, false));
   auto *NonNestedBB =
       BasicBlock::Create(Context, "non.nested", SpawningFn, nullptr);
   auto *NestedBB = BasicBlock::Create(Context, "nested", SpawningFn, nullptr);
@@ -398,75 +399,68 @@ void PIRToOpenMPPass::emitOMPRegionFn(
 
 Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
                                                  Module *M) {
+  auto *VoidTy = Type::getVoidTy(M->getContext());
+  auto *VoidPtrTy = Type::getInt8PtrTy(M->getContext());
+  auto *Int32Ty = Type::getInt32Ty(M->getContext());
+  // TODO double check for how SizeTy get created. Eventually, it get emitted
+  // as i64 on my machine.
+  auto *SizeTy = Type::getInt64Ty(M->getContext());
+  auto *IdentTyPtrTy = getIdentTyPointerTy();
   Constant *RTLFn = nullptr;
+
   switch (Function) {
   case OMPRTL__kmpc_fork_call: {
-    Type *TypeParams[] = {getIdentTyPointerTy(),
-                          Type::getInt32Ty(M->getContext()),
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty,
                           getKmpc_MicroPointerTy(M->getContext())};
-    FunctionType *FnTy =
-        FunctionType::get(Type::getVoidTy(M->getContext()), TypeParams, true);
+    FunctionType *FnTy = FunctionType::get(VoidTy, TypeParams, true);
     RTLFn = M->getOrInsertFunction("__kmpc_fork_call", FnTy);
     break;
   }
   case OMPRTL__kmpc_for_static_fini: {
-    Type *TypeParams[] = {getIdentTyPointerTy(),
-                          Type::getInt32Ty(M->getContext())};
-    FunctionType *FnTy = FunctionType::get(Type::getVoidTy(M->getContext()),
-                                           TypeParams, /*isVarArg*/ false);
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty};
+    FunctionType *FnTy =
+        FunctionType::get(VoidTy, TypeParams, /*isVarArg*/ false);
     RTLFn = M->getOrInsertFunction("__kmpc_for_static_fini", FnTy);
     break;
   }
   case OMPRTL__kmpc_master: {
-    Type *TypeParams[] = {getIdentTyPointerTy(),
-                          Type::getInt32Ty(M->getContext())};
-    FunctionType *FnTy = FunctionType::get(Type::getInt32Ty(M->getContext()),
-                                           TypeParams, /*isVarArg=*/false);
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty};
+    FunctionType *FnTy =
+        FunctionType::get(Int32Ty, TypeParams, /*isVarArg=*/false);
     RTLFn = M->getOrInsertFunction("__kmpc_master", FnTy);
     break;
   }
   case OMPRTL__kmpc_end_master: {
-    Type *TypeParams[] = {getIdentTyPointerTy(),
-                          Type::getInt32Ty(M->getContext())};
-    FunctionType *FnTy = FunctionType::get(Type::getVoidTy(M->getContext()),
-                                           TypeParams, /*isVarArg=*/false);
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty};
+    FunctionType *FnTy =
+        FunctionType::get(VoidTy, TypeParams, /*isVarArg=*/false);
     RTLFn = M->getOrInsertFunction("__kmpc_end_master", FnTy);
     break;
   }
   case OMPRTL__kmpc_omp_task_alloc: {
-    auto *Int32Ty = Type::getInt32Ty(M->getContext());
-    auto *VoidPtrTy = Type::getInt8PtrTy(M->getContext());
-    // TODO double check for how SizeTy get created. Eventually, it get emitted
-    // as i64 on my machine.
-    auto *SizeTy = Type::getInt64Ty(M->getContext());
-    Type *TypeParams[] = {
-        getIdentTyPointerTy(), Int32Ty, Int32Ty, SizeTy, SizeTy,
-        KmpRoutineEntryPtrTy};
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty, Int32Ty,
+                          SizeTy,       SizeTy,  KmpRoutineEntryPtrTy};
     FunctionType *FnTy =
         FunctionType::get(VoidPtrTy, TypeParams, /*isVarArg=*/false);
     RTLFn = M->getOrInsertFunction("__kmpc_omp_task_alloc", FnTy);
     break;
   }
   case OMPRTL__kmpc_omp_task: {
-    auto *Int32Ty = Type::getInt32Ty(M->getContext());
-    auto *VoidPtrTy = Type::getInt8PtrTy(M->getContext());
-    Type *TypeParams[] = {getIdentTyPointerTy(), Int32Ty, VoidPtrTy};
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty, VoidPtrTy};
     FunctionType *FnTy =
         FunctionType::get(Int32Ty, TypeParams, /*isVarArg=*/false);
     RTLFn = M->getOrInsertFunction("__kmpc_omp_task", FnTy);
     break;
   }
   case OMPRTL__kmpc_omp_taskwait: {
-    auto *Int32Ty = Type::getInt32Ty(M->getContext());
-    Type *TypeParams[] = {getIdentTyPointerTy(), Int32Ty};
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty};
     FunctionType *FnTy =
         FunctionType::get(Int32Ty, TypeParams, /*isVarArg=*/false);
     RTLFn = M->getOrInsertFunction("__kmpc_omp_taskwait", FnTy);
     break;
   }
   case OMPRTL__kmpc_global_thread_num: {
-    auto *Int32Ty = Type::getInt32Ty(M->getContext());
-    Type *TypeParams[] = {getIdentTyPointerTy()};
+    Type *TypeParams[] = {IdentTyPtrTy};
     FunctionType *FnTy =
         FunctionType::get(Int32Ty, TypeParams, /*isVarArg=*/false);
     RTLFn = M->getOrInsertFunction("__kmpc_global_thread_num", FnTy);
@@ -623,7 +617,8 @@ void PIRToOpenMPPass::emitOMPRegionLogic(
 ///
 /// \param Caller the function from which we wish to spawn the OMP task.
 ///
-/// \param ForkedFn the function that contains the work to be done by the spawned task.
+/// \param ForkedFn the function that contains the work to be done by the
+/// spawned task.
 ///
 /// \param LoadedCapturedArgs the values to be passed to the spawned task.
 ///
@@ -719,8 +714,8 @@ StructType *PIRToOpenMPPass::createSharedsTy(Function *F) {
 /// Emits some boilerplate code to kick off the task work and then calls the
 /// function that does the actual work.
 Function *PIRToOpenMPPass::emitProxyTaskFunction(
-    Type *KmpTaskTWithPrivatesPtrTy, Type *SharedsPtrTy,
-    Function *TaskFunction, Value *TaskPrivatesMap) {
+    Type *KmpTaskTWithPrivatesPtrTy, Type *SharedsPtrTy, Function *TaskFunction,
+    Value *TaskPrivatesMap) {
 
   auto OutlinedToEntryIt = OutlinedToEntryMap.find(TaskFunction);
 
@@ -762,6 +757,7 @@ Function *PIRToOpenMPPass::emitProxyTaskFunction(
     ++ArgAllocaIt;
   }
 
+  auto *Int8PtrTy = Type::getInt8PtrTy(C);
   auto GtidParam = IRBuilder.CreateAlignedLoad(ArgAllocas[0],
                                                DL.getTypeAllocSize(ArgTys[0]));
 
@@ -778,9 +774,9 @@ Function *PIRToOpenMPPass::emitProxyTaskFunction(
       DL.getTypeAllocSize(SharedsAddr->getType()->getPointerElementType()));
   auto SharedsParam =
       IRBuilder.CreatePointerBitCastOrAddrSpaceCast(Shareds, SharedsPtrTy);
-  auto TDParam = IRBuilder.CreatePointerBitCastOrAddrSpaceCast(
-      TDVal, Type::getInt8PtrTy(C));
-  auto PrivatesParam = ConstantPointerNull::get(Type::getInt8PtrTy(C));
+  auto TDParam =
+      IRBuilder.CreatePointerBitCastOrAddrSpaceCast(TDVal, Int8PtrTy);
+  auto PrivatesParam = ConstantPointerNull::get(Int8PtrTy);
 
   Value *TaskParams[] = {GtidParam,       PartIDAddr, PrivatesParam,
                          TaskPrivatesMap, TDParam,    SharedsParam};
@@ -806,14 +802,17 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
   auto &C = M->getContext();
   DataLayout DL(M);
 
-  auto *CopyFnTy =
-      FunctionType::get(Type::getVoidTy(C), {Type::getInt8PtrTy(C)}, true);
+  auto *VoidTy = Type::getVoidTy(C);
+  auto *Int8PtrTy = Type::getInt8PtrTy(C);
+  auto *Int32Ty = Type::getInt32Ty(C);
+  auto *Int32PtrTy = Type::getInt32PtrTy(C);
+
+  auto *CopyFnTy = FunctionType::get(VoidTy, {Int8PtrTy}, true);
   auto *CopyFnPtrTy = PointerType::getUnqual(CopyFnTy);
 
   auto *OutlinedFnTy = FunctionType::get(
-      Type::getVoidTy(C),
-      {Type::getInt32Ty(C), Type::getInt32PtrTy(C), Type::getInt8PtrTy(C),
-       CopyFnPtrTy, Type::getInt8PtrTy(C), SharedsPtrTy},
+      VoidTy,
+      {Int32Ty, Int32PtrTy, Int8PtrTy, CopyFnPtrTy, Int8PtrTy, SharedsPtrTy},
       false);
   auto *OutlinedFn = Function::Create(
       OutlinedFnTy, GlobalValue::InternalLinkage, ".omp_outlined.", M);
@@ -952,12 +951,12 @@ Value *PIRToOpenMPPass::getThreadID(Function *F) {
 
 Type *PIRToOpenMPPass::getOrCreateIdentTy(Module *M) {
   if (M->getTypeByName("ident_t") == nullptr) {
-    IdentTy = StructType::create(
-        "ident_t", Type::getInt32Ty(M->getContext()) /* reserved_1 */,
-        Type::getInt32Ty(M->getContext()) /* flags */,
-        Type::getInt32Ty(M->getContext()) /* reserved_2 */,
-        Type::getInt32Ty(M->getContext()) /* reserved_3 */,
-        Type::getInt8PtrTy(M->getContext()) /* psource */, nullptr);
+    auto *Int32Ty = Type::getInt32Ty(M->getContext());
+    auto *Int8PtrTy = Type::getInt8PtrTy(M->getContext());
+    IdentTy = StructType::create("ident_t", Int32Ty /* reserved_1 */,
+                                 Int32Ty /* flags */, Int32Ty /* reserved_2 */,
+                                 Int32Ty /* reserved_3 */,
+                                 Int8PtrTy /* psource */, nullptr);
   }
 
   return IdentTy;
@@ -1065,11 +1064,10 @@ Value *PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
   if (DefaultOpenMPLocation == nullptr) {
     // Constant *C = ConstantInt::get(Type::getInt32Ty(M->getContext()), 0,
     // true);
+    auto *Int32Ty = Type::getInt32Ty(M->getContext());
     ArrayRef<Constant *> Members = {
-        ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true),
-        ConstantInt::get(Type::getInt32Ty(M->getContext()), 2, true),
-        ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true),
-        ConstantInt::get(Type::getInt32Ty(M->getContext()), 0, true),
+        ConstantInt::get(Int32Ty, 0, true), ConstantInt::get(Int32Ty, 2, true),
+        ConstantInt::get(Int32Ty, 0, true), ConstantInt::get(Int32Ty, 0, true),
         DefaultOpenMPPSource};
     Constant *C = ConstantStruct::get(IdentTy, Members);
     auto *GV =
@@ -1085,8 +1083,8 @@ Value *PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
 
 FunctionType *PIRToOpenMPPass::getOrCreateKmpc_MicroTy(LLVMContext &Context) {
   if (Kmpc_MicroTy == nullptr) {
-    Type *MicroParams[] = {PointerType::getUnqual(Type::getInt32Ty(Context)),
-                           PointerType::getUnqual(Type::getInt32Ty(Context))};
+    auto *Int32PtrTy = PointerType::getUnqual(Type::getInt32Ty(Context));
+    Type *MicroParams[] = {Int32PtrTy, Int32PtrTy};
     Kmpc_MicroTy =
         FunctionType::get(Type::getVoidTy(Context), MicroParams, true);
   }
