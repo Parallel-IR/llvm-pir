@@ -373,8 +373,8 @@ void PIRToOpenMPPass::replaceExtractedRegionFnCall(
 
 void PIRToOpenMPPass::emitOMPRegionFn(
     Function *OMPRegionFn, Function *ForkedFn, Function *ContFn,
-    const std::vector<Argument *> &ForkedFnArgs,
-    const std::vector<Argument *> &ContFnArgs, bool Nested) {
+    ArrayRef<Argument *> ForkedFnArgs,
+    ArrayRef<Argument *> ContFnArgs, bool Nested) {
   auto *Module = OMPRegionFn->getParent();
   auto &Context = Module->getContext();
   auto *EntryBB = BasicBlock::Create(Context, "entry", OMPRegionFn, nullptr);
@@ -533,7 +533,7 @@ void PIRToOpenMPPass::emitOMPRegionLogic(
     Function *OMPRegionFn, IRBuilder<> &IRBuilder,
     ::IRBuilder<> &AllocaIRBuilder, Function *ForkedFn, Function *ContFn,
     DenseMap<Argument *, Value *> ParamToAllocaMap,
-    std::vector<Argument *> ForkedFnArgs, std::vector<Argument *> ContFnArgs,
+    ArrayRef<Argument *> ForkedFnArgs, ArrayRef<Argument *> ContFnArgs,
     bool Nested) {
   Module *M = OMPRegionFn->getParent();
   LLVMContext &C = OMPRegionFn->getContext();
@@ -554,7 +554,7 @@ void PIRToOpenMPPass::emitOMPRegionLogic(
             CapturedArgIt->second->getType()->getPointerElementType()));
 
     auto PrepareLoadsVec = [&CapturedArgIt, &CapturedArgLoad](
-                               const std::vector<Argument *> &FnArgs,
+                               ArrayRef<Argument *> FnArgs,
                                std::vector<Value *> &FnArgLoads) {
       auto ArgIt =
           std::find(FnArgs.begin(), FnArgs.end(), CapturedArgIt->first);
@@ -575,7 +575,7 @@ void PIRToOpenMPPass::emitOMPRegionLogic(
 
   BasicBlock *ExitBB =
       BasicBlock::Create(C, "omp_if.end", OMPRegionFn, nullptr);
-  ArrayRef<Value *> MasterArgs = {DefaultOpenMPLocation,
+  std::vector<Value *> MasterArgs = {DefaultOpenMPLocation,
                                   getThreadID(OMPRegionFn, IRBuilder)};
 
   if (!Nested) {
@@ -592,7 +592,7 @@ void PIRToOpenMPPass::emitOMPRegionLogic(
 
   auto *NewTask = emitTaskInit(OMPRegionFn, IRBuilder, AllocaIRBuilder,
                                ForkedFn, ForkedCapArgsLoads);
-  ArrayRef<Value *> TaskArgs = {DefaultOpenMPLocation,
+  std::vector<Value *> TaskArgs = {DefaultOpenMPLocation,
                                 getThreadID(OMPRegionFn, IRBuilder), NewTask};
   emitRuntimeCall(
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_task, M),
@@ -627,7 +627,7 @@ Value *PIRToOpenMPPass::emitTaskInit(Function *Caller,
                                      IRBuilder<> &CallerIRBuilder,
                                      IRBuilder<> &CallerAllocaIRBuilder,
                                      Function *ForkedFn,
-                                     std::vector<Value *> LoadedCapturedArgs) {
+                                     ArrayRef<Value *> LoadedCapturedArgs) {
   auto *M = Caller->getParent();
   DataLayout DL(M);
   LLVMContext &C = M->getContext();
@@ -666,7 +666,7 @@ Value *PIRToOpenMPPass::emitTaskInit(Function *Caller,
 
   // We only need tied tasks for now and that's what the 1 value is for.
   auto *TaskFlags = CallerIRBuilder.getInt32(1);
-  ArrayRef<Value *> AllocArgs = {
+  std::vector<Value *> AllocArgs = {
       DefaultOpenMPLocation,
       getThreadID(Caller, CallerIRBuilder),
       TaskFlags,
@@ -726,7 +726,7 @@ Function *PIRToOpenMPPass::emitProxyTaskFunction(
   auto *M = TaskFunction->getParent();
   auto &C = M->getContext();
   auto *Int32Ty = Type::getInt32Ty(C);
-  ArrayRef<Type *> ArgTys = {Int32Ty, KmpTaskTWithPrivatesPtrTy};
+  std::vector<Type *> ArgTys = {Int32Ty, KmpTaskTWithPrivatesPtrTy};
   auto *TaskEntryTy = FunctionType::get(Int32Ty, ArgTys, false);
   auto *TaskEntry = Function::Create(TaskEntryTy, GlobalValue::InternalLinkage,
                                      ".omp_task_entry.", M);
@@ -866,7 +866,7 @@ Function *PIRToOpenMPPass::emitTaskOutlinedFunction(Module *M,
 void PIRToOpenMPPass::emitTaskwaitCall(Function *Caller,
                                        IRBuilder<> &CallerIRBuilder,
                                        const DataLayout &DL) {
-  ArrayRef<Value *> Args = {DefaultOpenMPLocation,
+  std::vector<Value *> Args = {DefaultOpenMPLocation,
                             getThreadID(Caller, CallerIRBuilder)};
   emitRuntimeCall(
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_omp_taskwait,
@@ -985,7 +985,7 @@ void PIRToOpenMPPass::emitKmpRoutineEntryT(Module *M) {
     // Build typedef kmp_int32 (* kmp_routine_entry_t)(kmp_int32, void *); type.
     auto &C = M->getContext();
     auto *Int32Ty = Type::getInt32Ty(C);
-    ArrayRef<Type *> KmpRoutineEntryTyArgs = {Int32Ty, Type::getInt8PtrTy(C)};
+    std::vector<Type *> KmpRoutineEntryTyArgs = {Int32Ty, Type::getInt8PtrTy(C)};
     KmpRoutineEntryPtrTy = PointerType::getUnqual(
         FunctionType::get(Int32Ty, KmpRoutineEntryTyArgs, false));
   }
@@ -1065,7 +1065,7 @@ Value *PIRToOpenMPPass::getOrCreateDefaultLocation(Module *M) {
     // Constant *C = ConstantInt::get(Type::getInt32Ty(M->getContext()), 0,
     // true);
     auto *Int32Ty = Type::getInt32Ty(M->getContext());
-    ArrayRef<Constant *> Members = {
+    std::vector<Constant *> Members = {
         ConstantInt::get(Int32Ty, 0, true), ConstantInt::get(Int32Ty, 2, true),
         ConstantInt::get(Int32Ty, 0, true), ConstantInt::get(Int32Ty, 0, true),
         DefaultOpenMPPSource};

@@ -106,8 +106,8 @@ private:
 
   void emitOMPRegionFn(Function *OMPRegionFn, Function *ForkedFn,
                        Function *ContFn,
-                       const std::vector<Argument *> &ForkedFnArgs,
-                       const std::vector<Argument *> &ContFnArgs, bool Nested);
+                       ArrayRef<Argument *> ForkedFnArgs,
+                       ArrayRef<Argument *> ContFnArgs, bool Nested);
 
   /// Emits declaration of some OMP runtime functions.
   Constant *createRuntimeFunction(OpenMPRuntimeFunction Function, Module *M);
@@ -129,12 +129,12 @@ private:
                           llvm::IRBuilder<> &AllocaIRBuilder,
                           Function *ForkedFn, Function *ContFn,
                           DenseMap<Argument *, Value *> ArgToAllocaMap,
-                          std::vector<Argument *> ForkedFnArgs,
-                          std::vector<Argument *> ContFnArgs, bool Nested);
+                          ArrayRef<Argument *> ForkedFnArgs,
+                          ArrayRef<Argument *> ContFnArgs, bool Nested);
 
   Value *emitTaskInit(Function *Caller, IRBuilder<> &CallerIRBuilder,
                       IRBuilder<> &CallerAllocaIRBuilder, Function *ForkedFn,
-                      std::vector<Value *> LoadedCapturedArgs);
+                      ArrayRef<Value *> LoadedCapturedArgs);
 
   StructType *createSharedsTy(Function *F);
   Function *emitProxyTaskFunction(Type *KmpTaskTWithPrivatesPtrTy,
