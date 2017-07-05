@@ -182,6 +182,72 @@ void ParallelRegion::addParallelSubRegion(ParallelRegion &ParallelSubRegion) {
   ParallelSubRegions[&ParallelSubRegion.getFork()] = &ParallelSubRegion;
 }
 
+bool ParallelRegion::isParallelLoopRegion(const Loop &L,
+                                          const DominatorTree &DT) const {
+  // Bail if the fork is not part of the loop.
+  if (!L.contains(getFork().getParent()))
+    return false;
+
+  // Bail if a join is part of the loop.
+  const auto &JoinsVector = ContinuationTask.getHaltsOrJoints();
+  if (std::any_of(JoinsVector.begin(), JoinsVector.end(),
+                  [&L](TerminatorInst *TI) { return L.contains(TI); }))
+    return false;
+
+  // Now check for possible side effects outside the forked task. First the
+  // header to the fork and then the part of the continuation which is inside
+  // the loop.
+  SmallVector<BasicBlock *, 8> Worklist;
+  BasicBlock *HeaderBB = L.getHeader();
+  Worklist.push_back(HeaderBB);
+
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+    assert(L.contains(BB));
+
+    for (Instruction &I : *BB)
+      if (I.mayHaveSideEffects())
+        return false;
+
+    if (&getFork() == BB->getTerminator())
+      continue;
+
+    for (BasicBlock *SuccessorBB : successors(BB))
+      if (L.contains(SuccessorBB))
+        Worklist.push_back(SuccessorBB);
+  }
+
+  BasicBlock &ContinuationEntryBB = ContinuationTask.getEntry();
+  assert(L.contains(&ContinuationEntryBB) &&
+         "Fork instructions should not be used to exit a loop!");
+
+  // We do not support nested loops in the continuation part.
+  if (std::any_of(L.begin(), L.end(), [&](Loop *SubLoop) {
+        return ContinuationTask.contains(SubLoop, DT);
+      }))
+    return false;
+
+  // Traverse all blocks that are in the continuation and in the loop and check
+  // for side-effects.
+  assert(Worklist.empty());
+  Worklist.push_back(&ContinuationEntryBB);
+
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+    assert(L.contains(BB));
+
+    for (Instruction &I : *BB)
+      if (I.mayHaveSideEffects())
+        return false;
+
+    for (BasicBlock *SuccessorBB : successors(BB))
+      if (L.contains(SuccessorBB) && SuccessorBB != HeaderBB)
+        Worklist.push_back(SuccessorBB);
+  }
+
+  return true;
+}
+
 bool ParallelRegion::contains(const BasicBlock *BB,
                               const DominatorTree &DT) const {
   // All contained blocks are dominated by the fork block.
@@ -281,7 +347,7 @@ void ParallelRegionInfo::releaseMemory() {
 }
 
 ParallelRegionInfo::ParallelTaskMappingTy
-ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
+ParallelRegionInfo::recalculate(Function &F, const DominatorTree *DT) {
   releaseMemory();
 
   // A mapping from blocks to the parallel tasks they are contained in.
@@ -296,8 +362,12 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
     if (ContainsParallelTI)
       break;
   }
-  if (!ContainsParallelTI)
+
+  if (!ContainsParallelTI) {
+    F.addFnAttr(Attribute::NoPIR);
+
     return BB2PTMap;
+  }
 
   // We use reverse post order (RPO) here only for verification purposes. A
   // simple CFG traversal would do just fine if the parallel IR is well-formed
@@ -351,9 +421,9 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
       assert(PT->isForkedTask() &&
              "Found halt instruction in continuation task!");
       ParallelRegion &PR = PT->getParentRegion();
-      assert(DT.dominates(PR.getFork().getParent(), BB) &&
+      assert((!DT || DT->dominates(PR.getFork().getParent(), BB)) &&
              "Parallel region fork does not dominate halt instruction!");
-      assert(DT.dominates(&PT->getEntry(), BB) &&
+      assert((!DT || DT->dominates(&PT->getEntry(), BB)) &&
              "Forked task entry does not dominate halt instruction!");
       assert(PR.getFork().getContinuationBB() == Halt->getContinuationBB() &&
              "Halt successor was not the continuation block!");
@@ -373,9 +443,9 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
       assert(PT->isContinuationTask() &&
              "Found join instruction in forked task!");
       ParallelRegion &PR = PT->getParentRegion();
-      assert(DT.dominates(PR.getFork().getParent(), BB) &&
+      assert((!DT || DT->dominates(PR.getFork().getParent(), BB)) &&
              "Parallel region fork does not dominate join instruction!");
-      assert(DT.dominates(&PT->getEntry(), BB) &&
+      assert((!DT || DT->dominates(&PT->getEntry(), BB)) &&
              "Continuation task entry does not dominate join instruction!");
       PT->addHaltOrJoin(*Join);
       PT = PR.getParentTask();
@@ -406,6 +476,9 @@ ParallelRegionInfo::recalculate(Function &F, const DominatorTree &DT) {
     }
   }
 
+  if (BB2PTMap.empty())
+    F.addFnAttr(Attribute::NoPIR);
+
   return BB2PTMap;
 }
 
@@ -428,6 +501,59 @@ ParallelRegionInfo::createMapping() const {
   }
 
   return BB2PTMap;
+}
+
+void ParallelRegionInfo::getAllParallelRegions(
+    ParallelRegionVectorTy &Container) const {
+
+  Container.append(begin(), end());
+  for (unsigned i = 0; i < Container.size(); i++) {
+    ParallelRegion *PR = Container[i];
+
+    for (const auto &It : PR->getSubRegions())
+      Container.push_back(It.getSecond());
+  }
+}
+
+ParallelRegion *ParallelRegionInfo::getParallelLoopRegion(const Loop &L,
+                                        const DominatorTree &DT) const {
+  if (empty())
+    return nullptr;
+
+  SmallVector<ParallelRegion *, 8> ParallelRegions;
+  ParallelRegions.append(begin(), end());
+
+  // The parallel region we are looking for.
+  ParallelRegion *ParallelLoopRegion = nullptr;
+
+  while (!ParallelRegions.empty()) {
+    ParallelRegion *PR = ParallelRegions.pop_back_val();
+
+    for (const auto &It : PR->getSubRegions())
+      ParallelRegions.push_back(It.getSecond());
+
+    if (!PR->isParallelLoopRegion(L, DT))
+      continue;
+
+    assert(!ParallelLoopRegion &&
+           "Broken nesting resulted in multiple parallel loop regions");
+
+    ParallelLoopRegion = PR;
+
+#ifdef NDEBUG
+    // For debug builds we verify that at most one parallel loop region exists,
+    // otherwise we just assume the nesting was intact.
+    break;
+#endif
+  }
+
+  return ParallelLoopRegion;
+}
+
+bool ParallelRegionInfo::isParallelLoop(const Loop &L,
+                                        const DominatorTree &DT) const {
+  // See ParallelRegionInfo::getParallelLoopRegion(...) for more information.
+  return getParallelLoopRegion(L, DT) != nullptr;
 }
 
 bool ParallelRegionInfo::containedInAny(const BasicBlock *BB,
@@ -468,6 +594,8 @@ bool ParallelRegionInfo::maybeContainedInAny(const Loop *L,
 
 bool ParallelRegionInfo::isSafeToPromote(const AllocaInst &AI,
                                          const DominatorTree &DT) const {
+  if (empty())
+    return true;
 
   // First check if we know that AI is contained in a parallel region.
   ParallelRegion *AIPR = nullptr;
@@ -542,7 +670,7 @@ AnalysisKey ParallelRegionAnalysis::Key;
 ParallelRegionInfo ParallelRegionAnalysis::run(Function &F,
                                                FunctionAnalysisManager &AM) {
   DominatorTree &DT = AM.getResult<DominatorTreeAnalysis>(F);
-  return ParallelRegionInfo(F, DT);
+  return ParallelRegionInfo(F, &DT);
 }
 
 //===----------------------------------------------------------------------===//
@@ -551,7 +679,7 @@ ParallelRegionInfo ParallelRegionAnalysis::run(Function &F,
 
 bool ParallelRegionInfoPass::runOnFunction(Function &F) {
   auto &DT = getAnalysis<DominatorTreeWrapperPass>().getDomTree();
-  PRI.recalculate(F, DT);
+  PRI.recalculate(F, &DT);
   return false;
 }
 

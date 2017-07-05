@@ -67,8 +67,11 @@ BasicBlock *llvm::CloneBasicBlock(const BasicBlock *BB,
   if (CodeInfo) {
     CodeInfo->ContainsCalls          |= hasCalls;
     CodeInfo->ContainsDynamicAllocas |= hasDynamicAllocas;
-    CodeInfo->ContainsDynamicAllocas |= hasStaticAllocas && 
-                                        BB != &BB->getParent()->getEntryBlock();
+    CodeInfo->ContainsDynamicAllocas |=
+        hasStaticAllocas && BB != &BB->getParent()->getEntryBlock() &&
+        pred_begin(BB) != pred_end(BB) &&
+        !isa<HaltInst>((*pred_begin(BB))->getTerminator()) &&
+        !isa<ForkInst>((*pred_begin(BB))->getTerminator());
   }
   return NewBB;
 }
@@ -382,8 +385,11 @@ void PruningFunctionCloner::CloneBlock(const BasicBlock *BB,
   if (CodeInfo) {
     CodeInfo->ContainsCalls          |= hasCalls;
     CodeInfo->ContainsDynamicAllocas |= hasDynamicAllocas;
-    CodeInfo->ContainsDynamicAllocas |= hasStaticAllocas && 
-      BB != &BB->getParent()->front();
+    CodeInfo->ContainsDynamicAllocas |=
+        hasStaticAllocas && BB != &BB->getParent()->front() &&
+        pred_begin(BB) != pred_end(BB) &&
+        !isa<HaltInst>((*pred_begin(BB))->getTerminator()) &&
+        !isa<ForkInst>((*pred_begin(BB))->getTerminator());
   }
 }
 

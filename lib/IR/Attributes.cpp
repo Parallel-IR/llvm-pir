@@ -284,6 +284,8 @@ std::string Attribute::getAsString(bool InAttrGrp) const {
     return "norecurse";
   if (hasAttribute(Attribute::NoUnwind))
     return "nounwind";
+  if (hasAttribute(Attribute::NoPIR))
+    return "nopir";
   if (hasAttribute(Attribute::OptimizeNone))
     return "optnone";
   if (hasAttribute(Attribute::OptimizeForSize))

@@ -190,6 +190,7 @@ enum Kind {
   kw_noredzone,
   kw_noreturn,
   kw_nounwind,
+  kw_nopir,
   kw_optnone,
   kw_optsize,
   kw_readnone,

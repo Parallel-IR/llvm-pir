@@ -9,7 +9,7 @@ define i32 @alloca_used_in_seq_and_par_code() {
 entry:
 ; CHECK: %local_alloca = alloca i32
   %local_alloca = alloca i32
-  fork label %forked, label %cont
+  fork label %forked, %cont
 
 forked:                                       ; preds = %entry
 ; CHECK: store i32 0, i32* %local_alloca
@@ -35,7 +35,7 @@ define i32 @alloca_used_only_in_par_code() {
 entry:
 ; CHECK: alloca i32
   %local_alloca = alloca i32
-  fork label %forked, label %cont
+  fork label %forked, %cont
 
 forked:                                       ; preds = %entry
   store i32 0, i32* %local_alloca
@@ -59,7 +59,7 @@ entry:
 ; CHECK-NOT: alloca i32
   %local_alloca = alloca i32
   store i32 0, i32* %local_alloca
-  fork label %forked, label %cont
+  fork label %forked, %cont
 
 forked:                                       ; preds = %entry
   call void @foo()
