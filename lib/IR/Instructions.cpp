@@ -1101,8 +1101,7 @@ BasicBlock *UnreachableInst::getSuccessorV(unsigned idx) const {
 //                        ForkInst Implementation
 //===----------------------------------------------------------------------===//
 
-void ForkInst::AssertOK() {
-}
+void ForkInst::AssertOK() {}
 
 ForkInst::ForkInst(BasicBlock *Forked, BasicBlock *Continue,
                    Instruction *InsertBefore)
@@ -1125,6 +1124,17 @@ ForkInst::ForkInst(const ForkInst &FI)
   SubclassOptionalData = FI.SubclassOptionalData;
 }
 
+ForkInst::ForkInst(BasicBlock *Forked, BasicBlock *Continue,
+                   BasicBlock *InsertAtEnd)
+    : TerminatorInst(Type::getVoidTy(Forked->getContext()), Instruction::Fork,
+                     OperandTraits<ForkInst>::op_end(this), 2, InsertAtEnd) {
+  Op<0>() = Forked;
+  Op<1>() = Continue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
 void ForkInst::swapSuccessors() {
   Op<0>().swap(Op<1>());
 
@@ -1137,15 +1147,14 @@ void ForkInst::swapSuccessors() {
   // The first operand is the name. Fetch them backwards and build a new one.
   Metadata *Ops[] = {ProfileData->getOperand(1), ProfileData->getOperand(0)};
 
-  setMetadata(LLVMContext::MD_prof, MDNode::get(ProfileData->getContext(), Ops));
+  setMetadata(LLVMContext::MD_prof,
+              MDNode::get(ProfileData->getContext(), Ops));
 }
 
 BasicBlock *ForkInst::getSuccessorV(unsigned idx) const {
   return getSuccessor(idx);
 }
-unsigned ForkInst::getNumSuccessorsV() const {
-  return getNumSuccessors();
-}
+unsigned ForkInst::getNumSuccessorsV() const { return getNumSuccessors(); }
 void ForkInst::setSuccessorV(unsigned idx, BasicBlock *B) {
   assert(idx <= 1);
   setSuccessor(idx, B);
