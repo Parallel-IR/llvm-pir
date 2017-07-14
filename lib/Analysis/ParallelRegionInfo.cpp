@@ -206,8 +206,9 @@ bool ParallelRegion::isParallelLoopRegion(const Loop &L,
     assert(L.contains(BB));
 
     for (Instruction &I : *BB)
-      if (I.mayHaveSideEffects())
+      if (I.mayHaveSideEffects()) {
         return false;
+      }
 
     if (&getFork() == BB->getTerminator())
       continue;
@@ -224,8 +225,9 @@ bool ParallelRegion::isParallelLoopRegion(const Loop &L,
   // We do not support nested loops in the continuation part.
   if (std::any_of(L.begin(), L.end(), [&](Loop *SubLoop) {
         return ContinuationTask.contains(SubLoop, DT);
-      }))
+      })) {
     return false;
+  }
 
   // Traverse all blocks that are in the continuation and in the loop and check
   // for side-effects.
@@ -237,8 +239,11 @@ bool ParallelRegion::isParallelLoopRegion(const Loop &L,
     assert(L.contains(BB));
 
     for (Instruction &I : *BB)
-      if (I.mayHaveSideEffects())
+      // Why prevent side-effects here? Shouldn't be the responsibilty of
+      // the programmer to ensure correct memory access?
+      if (I.mayHaveSideEffects()) {
         return false;
+      }
 
     for (BasicBlock *SuccessorBB : successors(BB))
       if (L.contains(SuccessorBB) && SuccessorBB != HeaderBB)
@@ -268,24 +273,32 @@ bool ParallelRegion::contains(const Loop *L, const DominatorTree &DT) const {
   return contains(L->getHeader(), DT);
 }
 
-bool ParallelRegion::mayContain(const BasicBlock *BB,
-                                const DominatorTree &DT) const {
+bool ParallelRegion::mayContain(const BasicBlock *BB, const DominatorTree &DT,
+                                RegionPart Part) const {
   // All contained blocks are dominated by the fork block.
   if (!DT.properlyDominates(Fork.getParent(), BB))
     return false;
 
   // If the above condition is not met we let the sub-tasks handle it.
-  return ForkedTask.mayContain(BB, DT) || ContinuationTask.mayContain(BB, DT);
+  switch (Part) {
+  case RegionPart::Forked:
+    return ForkedTask.mayContain(BB, DT);
+  case RegionPart::Continuation:
+    return ContinuationTask.mayContain(BB, DT);
+  case RegionPart::Both:
+    return ForkedTask.mayContain(BB, DT) || ContinuationTask.mayContain(BB, DT);
+  }
 }
 
-bool ParallelRegion::mayContain(const Instruction *I,
-                                const DominatorTree &DT) const {
-  return mayContain(I->getParent(), DT);
+bool ParallelRegion::mayContain(const Instruction *I, const DominatorTree &DT,
+                                RegionPart Part) const {
+  return mayContain(I->getParent(), DT, Part);
 }
 
-bool ParallelRegion::mayContain(const Loop *L, const DominatorTree &DT) const {
+bool ParallelRegion::mayContain(const Loop *L, const DominatorTree &DT,
+                                RegionPart Part) const {
   // See ParallelTask::contains(const Loop *, DominatorTree &) for reasoning.
-  return mayContain(L->getHeader(), DT);
+  return mayContain(L->getHeader(), DT, Part);
 }
 
 void ParallelRegion::print(raw_ostream &OS, unsigned indent) const {
@@ -574,22 +587,27 @@ bool ParallelRegionInfo::containedInAny(const Loop *L,
   return containedInAny(L->getHeader(), DT);
 }
 
-bool ParallelRegionInfo::maybeContainedInAny(const BasicBlock *BB,
-                                             const DominatorTree &DT) const {
-  return std::any_of(
-      TopLevelParallelRegions.begin(), TopLevelParallelRegions.end(),
-      [BB, &DT](ParallelRegion *PR) { return PR->mayContain(BB, DT); });
+bool ParallelRegionInfo::maybeContainedInAny(
+    const BasicBlock *BB, const DominatorTree &DT,
+    RegionPart Part) const {
+  return std::any_of(TopLevelParallelRegions.begin(),
+                     TopLevelParallelRegions.end(),
+                     [BB, &DT, Part](ParallelRegion *PR) {
+                       return PR->mayContain(BB, DT, Part);
+                     });
 }
 
-bool ParallelRegionInfo::maybeContainedInAny(const Instruction *I,
-                                             const DominatorTree &DT) const {
-  return maybeContainedInAny(I->getParent(), DT);
+bool ParallelRegionInfo::maybeContainedInAny(
+    const Instruction *I, const DominatorTree &DT,
+    RegionPart Part) const {
+  return maybeContainedInAny(I->getParent(), DT, Part);
 }
 
-bool ParallelRegionInfo::maybeContainedInAny(const Loop *L,
-                                             const DominatorTree &DT) const {
+bool ParallelRegionInfo::maybeContainedInAny(
+    const Loop *L, const DominatorTree &DT,
+    RegionPart Part) const {
   // See ParallelTask::contains(const Loop *, DominatorTree &) for reasoning.
-  return maybeContainedInAny(L->getHeader(), DT);
+  return maybeContainedInAny(L->getHeader(), DT, Part);
 }
 
 bool ParallelRegionInfo::isSafeToPromote(const AllocaInst &AI,
@@ -604,6 +622,8 @@ bool ParallelRegionInfo::isSafeToPromote(const AllocaInst &AI,
       // In order to not perform a potentially linear contains check we will
       // skip parallel regions that have multi-exit tasks. This is conservative
       // but sound.
+      // NOTE Why differenciate between single-exit regions and multi-exit
+      // regions?
       if (!PR->hasTwoSingleExits())
         continue;
       if (!PR->contains(&AI, DT))
@@ -649,12 +669,14 @@ bool ParallelRegionInfo::isSafeToPromote(const AllocaInst &AI,
   // If we do not know that the alloca is inside a parallel task we will not
   // allow promotion if any user might be in a parallel region.
   // TODO Check only for spawned tasks not parallel regions.
+  // Add an enum to specify what to check: forked, cont, or both
+  // Go to mayContain
   for (const User *U : AI.users()) {
     const Instruction *I = dyn_cast<Instruction>(U);
     if (!I || !I->mayWriteToMemory())
       continue;
 
-    if (maybeContainedInAny(I, DT))
+    if (maybeContainedInAny(I, DT, RegionPart::Forked))
       return false;
   }
 

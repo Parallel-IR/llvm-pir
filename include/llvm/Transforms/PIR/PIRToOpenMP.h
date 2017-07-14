@@ -61,6 +61,7 @@
 #define LLVM_TRANSFORMS_PIR_PIRTOOPENMP_H
 
 #include "llvm/Analysis/ParallelRegionInfo.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -77,6 +78,7 @@ enum OpenMPRuntimeFunction {
   OMPRTL__kmpc_omp_task,
   OMPRTL__kmpc_omp_taskwait,
   OMPRTL__kmpc_global_thread_num,
+  OMPRTL__kmpc_barrier,
 };
 
 enum OpenMPSchedType {
@@ -96,10 +98,16 @@ public:
   void dump() const;
 
 private:
-  void startRegionEmission(const ParallelRegion &PR);
+  void startRegionEmission(const ParallelRegion &PR, LoopInfo &LI,
+                           const DominatorTree &DT);
+
+  void removePIRInstructions(ForkInst &ForkInst, const ParallelTask &ForkedTask,
+                             const ParallelTask &ContTask);
 
   Function *declareOMPRegionFn(Function *RegionFn, bool Nested,
                                ValueToValueMapTy &VMap);
+
+  void replaceExtractedRegionFnCall(CallInst *CI, Function *OMPRegionFn);
 
   void replaceExtractedRegionFnCall(CallInst *CI, Function *OMPRegionFn,
                                     Function *OMPNestedRegionFn);

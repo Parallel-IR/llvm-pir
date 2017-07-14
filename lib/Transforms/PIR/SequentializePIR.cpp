@@ -38,6 +38,7 @@ struct SequentializePIR : public FunctionPass {
   }
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
+    // NOTE Why twice?
     AU.addRequired<DominatorTreeWrapperPass>();
     AU.addRequired<ParallelRegionInfoPass>();
     AU.addRequired<LoopInfoWrapperPass>();

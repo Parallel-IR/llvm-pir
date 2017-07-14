@@ -24,6 +24,8 @@ class Loop;
 class ParallelTask;
 class ParallelRegion;
 
+enum RegionPart { Both, Forked, Continuation };
+
 /// The parallel region info (PRI) identifies and creates parallel regions.
 ///
 /// Currently the parallel region info is "lazy" in the sense that it does only
@@ -148,9 +150,15 @@ public:
 
   /// Check for possible containment in any parallel region.
   ///{
-  bool maybeContainedInAny(const BasicBlock *BB, const DominatorTree &DT) const;
-  bool maybeContainedInAny(const Instruction *I, const DominatorTree &DT) const;
-  bool maybeContainedInAny(const Loop *L, const DominatorTree &DT) const;
+  bool maybeContainedInAny(
+      const BasicBlock *BB, const DominatorTree &DT,
+      RegionPart Part = RegionPart::Both) const;
+  bool maybeContainedInAny(
+      const Instruction *I, const DominatorTree &DT,
+      RegionPart Part = RegionPart::Both) const;
+  bool maybeContainedInAny(
+      const Loop *L, const DominatorTree &DT,
+      RegionPart Part = RegionPart::Both) const;
   ///}
 
   /// Return true if promoting @p AI will not interfere with parallel regions.
@@ -388,13 +396,16 @@ public:
   }
 
   /// @see ParallelTask::mayContain(const BasicBlock *BB, DominatorTree &DT)
-  bool mayContain(const BasicBlock *BB, const DominatorTree &DT) const;
+  bool mayContain(const BasicBlock *BB, const DominatorTree &DT,
+                  RegionPart Part = RegionPart::Both) const;
 
   /// @see ParallelTask::mayContain(const Instruction *I, DominatorTree &DT)
-  bool mayContain(const Instruction *I, const DominatorTree &DT) const;
+  bool mayContain(const Instruction *I, const DominatorTree &DT,
+                  RegionPart Part = RegionPart::Both) const;
 
   /// @see ParallelTask::mayContain(const Loop *L, DominatorTree &DT)
-  bool mayContain(const Loop *L, const DominatorTree &DT) const;
+  bool mayContain(const Loop *L, const DominatorTree &DT,
+                  RegionPart Part = RegionPart::Both) const;
 
   /// Pretty print this parallel region and all sub-regions.
   ///{
