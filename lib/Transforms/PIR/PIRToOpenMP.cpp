@@ -19,33 +19,44 @@
 #include "llvm/Transforms/Utils/CodeExtractor.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/LoopPass.h"
+#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
+#include "llvm/Analysis/ScalarEvolutionExpander.h"
 
 using namespace llvm;
 
-bool PIRToOpenMPPass::runOnFunction(Function &F) {
-  PRI = &getAnalysis<ParallelRegionInfoPass>().getParallelRegionInfo();
+bool PIRToOpenMPPass::runOnModule(Module &M) {
+  for (auto &F : M) {
+    if (F.isDeclaration()) {
+      continue;
+    }
+    PRI = &getAnalysis<ParallelRegionInfoPass>(F).getParallelRegionInfo();
 
-  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
-  const DominatorTree &DT =
-    getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+    LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
+    DominatorTree &DT =
+      getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
+    ScalarEvolution &SE = getAnalysis<ScalarEvolutionWrapperPass>(F).getSE();
 
-  if (PRI->getTopLevelParallelRegions().size() > 0) {
-    auto M = (Module *)F.getParent();
-    getOrCreateIdentTy(M);
-    getOrCreateDefaultLocation(M);
+    if (PRI->getTopLevelParallelRegions().size() > 0) {
+      auto M = (Module *)F.getParent();
+      getOrCreateIdentTy(M);
+      getOrCreateDefaultLocation(M);
+    }
+
+    for (auto Region : PRI->getTopLevelParallelRegions())
+      startRegionEmission(*Region, LI, DT, SE);
   }
-
-  for (auto Region : PRI->getTopLevelParallelRegions())
-    startRegionEmission(*Region, LI, DT);
 
   return false;
 }
 
 void PIRToOpenMPPass::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesAll();
+  // AU.setPreservesAll();
   AU.addRequired<DominatorTreeWrapperPass>();
   AU.addRequired<ParallelRegionInfoPass>();
   AU.addRequired<LoopInfoWrapperPass>();
+  AU.addRequired<ScalarEvolutionWrapperPass>();
 }
 
 void PIRToOpenMPPass::print(raw_ostream &OS, const Module *) const {
@@ -58,124 +69,34 @@ void PIRToOpenMPPass::dump() const { PRI->dump(); }
 
 #define DUMP(IRObj) errs() << #IRObj ":"; IRObj->dump();
 
+// Make sure that any value shared accross the parallel region bounds is a
+// pointer and not a primitive value.
+bool PIRToOpenMPPass::verifyExtractedFn(Function *Fn) const {
+#if !defined(NDEBUG)
+  for (auto *ParamTy : Fn->getFunctionType()->params()) {
+    if (!ParamTy->isPointerTy())
+      return false;
+  }
+#endif
+
+  return true;
+}
+
 /// Extracts the region and tasks contained in \p PR and starts code OMP
 /// generation.
 void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
-                                          LoopInfo &LI,
-                                          const DominatorTree &DT) {
-  // Check if \p PR is a parallel loop
-  Loop *L = LI.getLoopFor(PR.getFork().getParent());
-  bool IsParallelLoop = (L && PR.isParallelLoopRegion(*L, DT));
-
-  auto &ForkInst = PR.getFork();
-  Function *SpawningFn = ForkInst.getParent()->getParent();
-
-  if (IsParallelLoop) {
-    errs() << "Parallel Loop:\n";
-    auto *LoopLatch = L->getLoopLatch();
-    assert(LoopLatch &&
-           "Only parallel loops with a single latch are supported.");
-    DUMP(LoopLatch);
-    // Extract the register corresponding to the iteration variable.
-    auto *LatchBr = dyn_cast<BranchInst>(LoopLatch->getTerminator());
-    DUMP(LatchBr);
-    auto *LatchCond = dyn_cast<ICmpInst>(LatchBr->getCondition());
-    DUMP(LatchCond);
-    // OpenMP 4.0.0 Spec (p. 51):
-    // The loop test-expr must have one of the following forms:
-    //   var relational-op b
-    //   b relational-op var
-    assert(LatchCond->isRelational());
-    auto *CondLHS = LatchCond->getOperand(0);
-    auto *CondRHS = LatchCond->getOperand(1);
-    DUMP(CondLHS);
-    DUMP(CondRHS);
-    assert((dyn_cast<BinaryOperator>(CondLHS) ||
-            dyn_cast<BinaryOperator>(CondRHS)) &&
-           "One of the test-expr operands must be the result of an "
-           "increment/decrement expression.");
-    auto *IncrInst = isa<BinaryOperator>(CondLHS)
-                         ? dyn_cast<BinaryOperator>(CondLHS)
-                         : dyn_cast<BinaryOperator>(CondRHS);
-    // The iteration count must be a loop-invariant expression, hence, its
-    // result will be stored in a register that is defined before the loop and
-    // always used in the condition expression.
-    auto *IterCount = isa<BinaryOperator>(CondLHS) ? CondRHS : CondLHS;
-    DUMP(IncrInst);
-    DUMP(IterCount);
-
-    assert(
-        (IncrInst->getOpcode() == Instruction::Add ||
-         IncrInst->getOpcode() == Instruction::Sub) &&
-        "Only + and - are allowed as increment operators in a parallel loop");
-    auto *IncrLHS = IncrInst->getOperand(0);
-    auto *IncrRHS = IncrInst->getOperand(1);
-
-    // OpenMP 4.0.0 Spec (p. 51):
-    // The loop iteration variable can only be modified through the increment
-    // expression. This means that the operand of IncrInst that corresponds to
-    // the iteration variable must be the result of phi instruction. In other
-    // words, it is not possible that the interation variable is
-    // modified/initialized any where in the loop other than the header and the
-    // increment parts.
-    auto *IterVar = isa<PHINode>(IncrLHS) ? dyn_cast<PHINode>(IncrLHS)
-                                          : dyn_cast<PHINode>(IncrRHS);
-    auto *IncrExpr = isa<PHINode>(IncrLHS) ? IncrRHS : IncrLHS;
-    auto *IterVarTy = IterVar->getType();
-
-    DUMP(IterVar);
-    DUMP(IncrExpr);
-    DUMP(IterVarTy);
-
-    auto &ForkedTask = PR.getForkedTask();
-    auto &ContTask = PR.getContinuationTask();
-
-    auto *RegToMem = createDemoteRegisterToMemoryPass();
-    RegToMem->runOnFunction(*ForkInst.getParent()->getParent());
-
-    std::vector<BasicBlock *> LoopBBs;
-    std::vector<BasicBlock *> LoopBodyBBs;
-
-    LoopBBs.push_back(ForkInst.getParent());
-
-    ParallelTask::VisitorTy ForkedVisitor = [&LoopBodyBBs, &LoopBBs](
-        BasicBlock &BB, const ParallelTask &PT) -> bool {
-      LoopBodyBBs.push_back(&BB);
-      LoopBBs.push_back(&BB);
-      return true;
-    };
-
-    ForkedTask.visit(ForkedVisitor, true);
-
-    LoopBBs.push_back(LoopLatch);
-
-    removePIRInstructions(ForkInst, ForkedTask, ContTask);
-
-    CodeExtractor LoopExtractor(LoopBBs);
-    Function *LoopFn = LoopExtractor.extractCodeRegion();
-
-    CodeExtractor LoopBodyExtractor(LoopBodyBBs);
-    Function *LoopBodyFn = LoopBodyExtractor.extractCodeRegion();
-    DUMP(LoopBodyFn);
-
-    // Make sure that any value shared accross the parallel region bounds is a
-    // pointer and not a primitive value.
-    for (auto *ParamTy : LoopFn->getFunctionType()->params()) {
-      assert(ParamTy->isPointerTy() &&
-             "Parallel regions must capture addresses not values!");
-    }
-
-    // Create the outlined function that contains the OpenMP calls required for
-    // outermost regions. This corresponds to the "if (omp_get_num_threads() ==
-    // 1)" part as indicated by the example in the header file.
-    ValueToValueMapTy VMap;
-    auto *OMPLoopFn = declareOMPRegionFn(LoopFn, false, VMap);
-
+                                          LoopInfo &LI, DominatorTree &DT,
+                                          ScalarEvolution &SE) {
+  // A utility function used to find calls that replace extracted parallel
+  // region function.
+  auto FindCallToExtractedFn = [](Function *SpawningFn,
+                                  Function *ExtractedFn) {
+    // Find the call instruction to the extracted region function: RegionFn.
     CallInst *ExtractedFnCI = nullptr;
     for (auto &BB : *SpawningFn) {
       if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
         // NOTE: I use pointer equality here, is that fine?
-        if (LoopFn == CI->getCalledFunction()) {
+        if (ExtractedFn == CI->getCalledFunction()) {
           ExtractedFnCI = CI;
           break;
         }
@@ -185,50 +106,173 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     assert(ExtractedFnCI != nullptr &&
            "Couldn't find the call to the extracted region function!");
 
+    return ExtractedFnCI;
+  };
 
-    replaceExtractedRegionFnCall(ExtractedFnCI, OMPLoopFn);
+  // Check if \p PR is a parallel loop
+  Loop *L = LI.getLoopFor(PR.getFork().getParent());
+  bool IsParallelLoop = (L && PR.isParallelLoopRegion(*L, DT));
 
-    auto *Module = OMPLoopFn->getParent();
-    auto &Context = Module->getContext();
-    DataLayout DL(OMPLoopFn->getParent());
+  auto &ForkInst = PR.getFork();
+  Function *SpawningFn = ForkInst.getParent()->getParent();
 
-    auto *EntryBB = BasicBlock::Create(Context, "entry", OMPLoopFn, nullptr);
-    auto Int32Ty = Type::getInt32Ty(Context);
-    Value *Undef = UndefValue::get(Int32Ty);
-    auto *AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt", EntryBB);
-    IRBuilder<> AllocaIRBuilder(EntryBB,
-                                ((Instruction *)AllocaInsertPt)->getIterator());
+  if (IsParallelLoop) {
+    auto *CIV = L->getCanonicalInductionVariable();
+    assert(CIV && "Non-canonical loop");
 
-    IRBuilder<> StoreIRBuilder(EntryBB);
-    auto ParamToAllocaMap =
-      emitImplicitArgs(OMPLoopFn, AllocaIRBuilder, StoreIRBuilder, false);
+    auto *LoopLatch = L->getLoopLatch();
+    assert(LoopLatch &&
+           "Only parallel loops with a single latch are supported.");
 
-    auto CapturedArgIt = ParamToAllocaMap.begin();
+    auto &ForkedTask = PR.getForkedTask();
+    auto &ContTask = PR.getContinuationTask();
 
-    // For each captured variable, emit a LoadInst and add it to
-    // ForkedCapArgsLoads and/or ContCapArgsLoads as needed.
-    while (CapturedArgIt != ParamToAllocaMap.end()) {
-      auto *CapturedArgLoad = StoreIRBuilder.CreateAlignedLoad(
-          CapturedArgIt->second,
-          DL.getTypeAllocSize(
-              CapturedArgIt->second->getType()->getPointerElementType()));
-      ++CapturedArgIt;
+    // llvm::errs() << "*** SCEV loop exit: \n";
+    // auto *EC = SE.getExitCount(L, L->getExitingBlock());
+    // EC->dump();
+
+    // If a value is:
+    //   1. Used inside the loop.
+    //   2. Defined outside the loop.
+    // then, demote that value to memory so that it can be shared across
+    // the serial/parallel region.
+    // TODO this should be done for non-loop regions as well.
+    std::vector<AllocaInst *> DemotedAllocas;
+    for (auto *BB : L->blocks()) {
+      for (auto &I : *BB) {
+        for (auto &U : I.operands()) {
+          if (auto *I2 = dyn_cast<Instruction>(&*U)) {
+            if (!L->contains(I2) /*&& !I2->getType()->isPointerTy()*/) {
+              DemotedAllocas.push_back(DemoteRegToStack(*I2));
+            }
+          }
+        }
+      }
     }
 
-    AllocaInsertPt->eraseFromParent();
+    removePIRInstructions(ForkInst, ForkedTask, ContTask);
 
-    std::vector<Value *> BarrierArgs = {DefaultOpenMPLocation,
-                                        getThreadID(OMPLoopFn, StoreIRBuilder)};
-    emitRuntimeCall(createRuntimeFunction(
-                        OpenMPRuntimeFunction::OMPRTL__kmpc_barrier, Module),
-                    BarrierArgs, "", StoreIRBuilder);
+    CodeExtractor LoopExtractor(DT, *L);
+    Function *LoopFn = LoopExtractor.extractCodeRegion();
+    assert(verifyExtractedFn(LoopFn));
 
-    StoreIRBuilder.CreateRetVoid();
+    // Create the outlined function that contains the OpenMP calls required for
+    // outermost regions. This corresponds to the "if (omp_get_num_threads() ==
+    // 1)" part as indicated by the example in the header file.
+    ValueToValueMapTy VMap;
+    auto *OMPLoopFn = declareOMPRegionFn(LoopFn, false, VMap);
+    // Create the outlined function that contains the OpenMP calls required for
+    // nested regions. This corresponds to the "else" part as indicated by the
+    // example in the header file.
+    ValueToValueMapTy NestedVMap;
+    auto *OMPNestedLoopFn = declareOMPRegionFn(LoopFn, true, NestedVMap);
+
+    auto *ExtractedFnCI = FindCallToExtractedFn(SpawningFn, LoopFn);
+
+    auto ArgIt = ExtractedFnCI->arg_begin();
+    auto &LoopFnEntryBB = LoopFn->getEntryBlock();
+
+    // Value *AllocaInsertPt;
+    // for (auto &I : LoopFnEntryBB) {
+    //   errs() << "I: " << I << "\n";
+    //   if (dyn_cast<AllocaInst>(&I)) {
+    //     continue;
+    //   } else {
+    //     AllocaInsertPt = &I;
+    //     break;
+    //   }
+    // }
+    // errs() << "InsertPt: " << *AllocaInsertPt << "\n";
+    // IRBuilder<> AllocaIRBuilder(&LoopFnEntryBB,
+    //                             ((Instruction *)AllocaInsertPt)->getIterator());
+
+    IRBuilder<> IRBuilder(&LoopFnEntryBB,
+                          LoopFnEntryBB.getTerminator()->getIterator());
+    // IRBuilder.CreateStore(ParamVal, CloneAlloca);
+
+    while (ArgIt != ExtractedFnCI->arg_end()) {
+      if (std::find(DemotedAllocas.begin(), DemotedAllocas.end(), *ArgIt) !=
+          DemotedAllocas.end()) {
+        auto ParamIt =
+            std::next(LoopFn->arg_begin(),
+                      std::distance(ExtractedFnCI->arg_begin(), ArgIt));
+
+        auto *ParamVal = IRBuilder.CreateLoad(&*ParamIt);
+        auto *ParamType = (PointerType*)ParamIt->getType();
+
+        // auto *CloneAlloca = AllocaIRBuilder.CreateAlloca(
+        //     ParamType->getElementType(), nullptr,
+        //     ParamIt->getName() + ".clone");
+        // ParamIt->replaceAllUsesWith(CloneAlloca);
+        // errs() << "isAllocaPromotable: " << isAllocaPromotable(CloneAlloca)
+        //        << "\n";
+
+        for (auto &U : ParamIt->uses()) {
+          if (auto *UI = dyn_cast<Instruction>(U.getUser())) {
+            if (UI != ParamVal) {
+              UI->replaceAllUsesWith(ParamVal);
+              UI->eraseFromParent();
+            }
+          }
+        }
+
+      }
+
+      ++ArgIt;
+    }
     
-    errs() << "OMPRegionFn: \n";
-    OMPLoopFn->dump();
+    // Replace ExtractedFnCI with an if-else region that calls the outermost and
+    // nested functions.
+    replaceExtractedRegionFnCall(ExtractedFnCI, OMPLoopFn, OMPNestedLoopFn);
+
+    // llvm::errs() << "SCEV again:\n";
+    // EC->dump();
+
+    emitOMPRegionFn(OMPLoopFn, LoopFn, VMap, false);
+
+    emitOMPRegionFn(OMPNestedLoopFn, LoopFn, NestedVMap, true);
+
+    // auto *Module = OMPLoopFn->getParent();
+    // auto &Context = Module->getContext();
+    // DataLayout DL(OMPLoopFn->getParent());
+
+    // auto *EntryBB = BasicBlock::Create(Context, "entry", OMPLoopFn, nullptr);
+    // auto Int32Ty = Type::getInt32Ty(Context);
+    // Value *Undef = UndefValue::get(Int32Ty);
+    // auto *AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt", EntryBB);
+    // IRBuilder<> AllocaIRBuilder(EntryBB,
+    //                             ((Instruction *)AllocaInsertPt)->getIterator());
+
+    // IRBuilder<> StoreIRBuilder(EntryBB);
+    // auto ParamToAllocaMap =
+    //   emitImplicitArgs(OMPLoopFn, AllocaIRBuilder, StoreIRBuilder, false);
+
+    // auto CapturedArgIt = ParamToAllocaMap.begin();
+
+    // // For each captured variable, emit a LoadInst and add it to
+    // // ForkedCapArgsLoads and/or ContCapArgsLoads as needed.
+    // while (CapturedArgIt != ParamToAllocaMap.end()) {
+    //   auto *CapturedArgLoad = StoreIRBuilder.CreateAlignedLoad(
+    //       CapturedArgIt->second,
+    //       DL.getTypeAllocSize(
+    //           CapturedArgIt->second->getType()->getPointerElementType()));
+    //   ++CapturedArgIt;
+    // }
+
+    // AllocaInsertPt->eraseFromParent();
+
+    // std::vector<Value *> BarrierArgs = {DefaultOpenMPLocation,
+    //                                     getThreadID(OMPLoopFn, StoreIRBuilder)};
+    // emitRuntimeCall(createRuntimeFunction(
+    //                     OpenMPRuntimeFunction::OMPRTL__kmpc_barrier, Module),
+    //                 BarrierArgs, "", StoreIRBuilder);
+
+    // StoreIRBuilder.CreateRetVoid();
+    
+    // errs() << "OMPRegionFn: \n";
+    // OMPLoopFn->dump();
   } else {
-    errs() << "Parallel Region:\n";
+    // errs() << "Parallel Region:\n";
     // Split the fork instruction parent into 2 BBs to satisfy the assumption
     // of CodeExtractor (i.e. single-entry region and the head BB is the entry).
     auto *OldForkInstBB = ForkInst.getParent();
@@ -271,13 +315,7 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
 
     CodeExtractor RegionExtractor(RegionBBs);
     Function *RegionFn = RegionExtractor.extractCodeRegion();
-
-    // Make sure that any value shared accross the parallel region bounds is a
-    // pointer and not a primitive value.
-    for (auto *ParamTy : RegionFn->getFunctionType()->params()) {
-      assert(ParamTy->isPointerTy() &&
-             "Parallel regions must capture addresses not values!");
-    }
+    assert(verifyExtractedFn(RegionFn));
 
     CodeExtractor ForkedExtractor(ForkedBBs);
     Function *ForkedFn = ForkedExtractor.extractCodeRegion();
@@ -302,20 +340,7 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     ValueToValueMapTy NestedVMap;
     auto *OMPNestedRegionFn = declareOMPRegionFn(RegionFn, true, NestedVMap);
 
-    // Find the call instruction to the extracted region function: RegionFn.
-    CallInst *ExtractedFnCI = nullptr;
-    for (auto &BB : *SpawningFn) {
-      if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
-        // NOTE: I use pointer equality here, is that fine?
-        if (RegionFn == CI->getCalledFunction()) {
-          ExtractedFnCI = CI;
-          break;
-        }
-      }
-    }
-
-    assert(ExtractedFnCI != nullptr &&
-           "Couldn't find the call to the extracted region function!");
+    auto *ExtractedFnCI = FindCallToExtractedFn(SpawningFn, RegionFn);
 
     // Replace ExtractedFnCI with an if-else region that calls the outermost and
     // nested functions.
@@ -327,7 +352,7 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
                                  ValueToValueMapTy &VMap) {
       std::vector<Argument *> FilteredArgs;
 
-      // Locate the CallInst to ChildFn
+      // Locate the CallInst to TaskFn
       for (auto &BB : *ExtractedRegionFn) {
         if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
           if (TaskFn == CI->getCalledFunction()) {
@@ -436,11 +461,9 @@ Function *PIRToOpenMPPass::declareOMPRegionFn(Function *RegionFn, bool Nested,
   auto &RegionFnArgList = RegionFn->getArgumentList();
 
   int ArgOffset = Nested ? 0 : 2;
+
   // For RegionFn argument add a corresponding argument to the new function.
   for (auto &Arg : RegionFnArgList) {
-    assert(Arg.getType()->isPointerTy() &&
-           "Parallel regions must capture addresses not values!");
-
     FnParams.push_back(Arg.getType());
     FnArgNames.push_back(Arg.getName());
 
@@ -485,38 +508,6 @@ Function *PIRToOpenMPPass::declareOMPRegionFn(Function *RegionFn, bool Nested,
   return OMPRegionFn;
 }
 
-void PIRToOpenMPPass::replaceExtractedRegionFnCall(CallInst *CI,
-                                                   Function *OMPRegionFn) {
-  auto *RegionFn = CI->getCalledFunction();
-  auto *SpawningFn = CI->getParent()->getParent();
-  auto *Module = SpawningFn->getParent();
-  auto &Context = Module->getContext();
-
-  IRBuilder<> IRBuilder(CI);
-  // Pass some parameters required by OMP runtime.
-  auto *Int32Ty = Type::getInt32Ty(Context);
-  std::vector<Value *> OMPRegionFnArgs = {
-      DefaultOpenMPLocation,
-      ConstantInt::getSigned(Int32Ty, RegionFn->arg_size()),
-      IRBuilder.CreateBitCast(OMPRegionFn, getKmpc_MicroPointerTy(Context))};
-
-  auto ArgIt = CI->arg_begin();
-
-  // Append the rest of the region's arguments.
-  while (ArgIt != CI->arg_end()) {
-    OMPRegionFnArgs.push_back(ArgIt->get());
-    ++ArgIt;
-  }
-
-  // call __kmpc_fork_call passing it OMPRegionFn
-  auto ForkRTFn = createRuntimeFunction(
-      OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, Module);
-  // Replace the old call with __kmpc_fork_call
-  emitRuntimeCall(ForkRTFn, OMPRegionFnArgs, "", IRBuilder);
-
-  CI->eraseFromParent();
-}
-
 /// Replaces \p CI with an if-else region that calls \p OMPRegionFn and \p
 /// OMPNestedRegionFn.
 ///
@@ -525,7 +516,7 @@ void PIRToOpenMPPass::replaceExtractedRegionFnCall(CallInst *CI,
 /// \param OMPRegionFn an outlined function containing outermost OMP logic.
 ///
 /// \param OMPNestedRegionFn an outlined function containing nested OMP logic.
-void PIRToOpenMPPass::replaceExtractedRegionFnCall(
+std::pair<CallInst *, CallInst *> PIRToOpenMPPass::replaceExtractedRegionFnCall(
     CallInst *CI, Function *OMPRegionFn, Function *OMPNestedRegionFn) {
   auto *RegionFn = CI->getCalledFunction();
   auto *SpawningFn = CI->getParent()->getParent();
@@ -574,16 +565,44 @@ void PIRToOpenMPPass::replaceExtractedRegionFnCall(
   auto ForkRTFn = createRuntimeFunction(
       OpenMPRuntimeFunction::OMPRTL__kmpc_fork_call, Module);
   // Replace the old call with __kmpc_fork_call
-  emitRuntimeCall(ForkRTFn, OMPRegionFnArgs, "", IRBuilder);
+  auto *ForkCall = emitRuntimeCall(ForkRTFn, OMPRegionFnArgs, "", IRBuilder);
   IRBuilder.CreateBr(BBRemainder);
 
   IRBuilder.SetInsertPoint(NestedBB);
   // Replace the old call with a call to the nested version of the parallel
   // region.
-  emitRuntimeCall(OMPNestedRegionFn, OMPNestedRegionFnArgs, "", IRBuilder);
+  auto *NestedCall = emitRuntimeCall(OMPNestedRegionFn, OMPNestedRegionFnArgs, "", IRBuilder);
   IRBuilder.CreateBr(BBRemainder);
 
   CI->eraseFromParent();
+  return {ForkCall, NestedCall};
+}
+
+void PIRToOpenMPPass::emitOMPRegionFn(Function *OMPRegionFn, Function *LoopFn,
+                                      ValueToValueMapTy &VMap, bool Nested) {
+  SmallVector<ReturnInst*, 1> Returns;
+  CloneFunctionInto(OMPRegionFn, LoopFn, VMap, false, Returns);
+  auto &LoopEntry = OMPRegionFn->getEntryBlock();
+
+  auto *Module = OMPRegionFn->getParent();
+  auto &Context = Module->getContext();
+  auto *EntryBB = BasicBlock::Create(Context, "entry", OMPRegionFn, &LoopEntry);
+  auto Int32Ty = Type::getInt32Ty(Context);
+  Value *Undef = UndefValue::get(Int32Ty);
+  auto *AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt", EntryBB);
+  IRBuilder<> AllocaIRBuilder(EntryBB,
+                              ((Instruction *)AllocaInsertPt)->getIterator());
+
+  IRBuilder<> StoreIRBuilder(EntryBB);
+  auto ParamToAllocaMap =
+      emitImplicitArgs(OMPRegionFn, AllocaIRBuilder, StoreIRBuilder, Nested);
+
+  emitOMPRegionLogic(OMPRegionFn, StoreIRBuilder, AllocaIRBuilder, &LoopEntry,
+                     ParamToAllocaMap, Nested);
+
+  // StoreIRBuilder.CreateRetVoid();
+
+  AllocaInsertPt->eraseFromParent();
 }
 
 void PIRToOpenMPPass::emitOMPRegionFn(
@@ -617,6 +636,7 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
   auto *VoidTy = Type::getVoidTy(M->getContext());
   auto *VoidPtrTy = Type::getInt8PtrTy(M->getContext());
   auto *Int32Ty = Type::getInt32Ty(M->getContext());
+  auto *Int32PtrTy = Type::getInt32PtrTy(M->getContext());
   // TODO double check for how SizeTy get created. Eventually, it get emitted
   // as i64 on my machine.
   auto *SizeTy = Type::getInt64Ty(M->getContext());
@@ -629,6 +649,15 @@ Constant *PIRToOpenMPPass::createRuntimeFunction(OpenMPRuntimeFunction Function,
                           getKmpc_MicroPointerTy(M->getContext())};
     FunctionType *FnTy = FunctionType::get(VoidTy, TypeParams, true);
     RTLFn = M->getOrInsertFunction("__kmpc_fork_call", FnTy);
+    break;
+  }
+  case OMPRTL__kmpc_for_static_init_4: {
+    Type *TypeParams[] = {IdentTyPtrTy, Int32Ty,    Int32Ty,
+                          Int32PtrTy,   Int32PtrTy, Int32PtrTy,
+                          Int32PtrTy,   Int32Ty,    Int32Ty};
+    FunctionType *FnTy =
+      FunctionType::get(VoidTy, TypeParams, /*isVarArg*/ false);
+    RTLFn = M->getOrInsertFunction("__kmpc_for_static_init_4", FnTy);
     break;
   }
   case OMPRTL__kmpc_for_static_fini: {
@@ -752,6 +781,156 @@ PIRToOpenMPPass::emitImplicitArgs(Function *OMPRegionFn,
   }
 
   return ParamToAllocaMap;
+}
+
+void PIRToOpenMPPass::emitOMPRegionLogic(
+    Function *OMPRegionFn, IRBuilder<> &IRBuilder,
+    ::IRBuilder<> &AllocaIRBuilder, BasicBlock *LoopEntry,
+    DenseMap<Argument *, Value *> ParamToAllocaMap, bool Nested) {
+  Module *M = OMPRegionFn->getParent();
+  LLVMContext &C = OMPRegionFn->getContext();
+  DataLayout DL(OMPRegionFn->getParent());
+  auto *Int32Ty = Type::getInt32Ty(C);
+  auto *LoopHeader = LoopEntry->getSingleSuccessor();
+
+  auto CapturedArgIt = ParamToAllocaMap.begin();
+
+  while (CapturedArgIt != ParamToAllocaMap.end()) {
+    auto *CapturedArgLoad = IRBuilder.CreateAlignedLoad(
+        CapturedArgIt->second,
+        DL.getTypeAllocSize(
+            CapturedArgIt->second->getType()->getPointerElementType()));
+
+    ++CapturedArgIt;
+  }
+
+  // Emit iteration variable
+  auto *IV = AllocaIRBuilder.CreateAlloca(Int32Ty, nullptr, ".omp.iv");
+  IV->setAlignment(DL.getTypeAllocSize(Int32Ty));
+  // Emit alloca's to hold the thread's lower-bound, upper-bound, stride,
+  // and is-last values.
+  auto *LB = AllocaIRBuilder.CreateAlloca(Int32Ty, nullptr, ".omp.lb");
+  LB->setAlignment(DL.getTypeAllocSize(Int32Ty));
+  auto *UB = AllocaIRBuilder.CreateAlloca(Int32Ty, nullptr, ".omp.ub");
+  UB->setAlignment(DL.getTypeAllocSize(Int32Ty));
+  auto *Stride = AllocaIRBuilder.CreateAlloca(Int32Ty, nullptr, ".omp.stride");
+  Stride->setAlignment(DL.getTypeAllocSize(Int32Ty));
+  auto *IsLast = AllocaIRBuilder.CreateAlloca(Int32Ty, nullptr, ".omp.is_last");
+  Stride->setAlignment(DL.getTypeAllocSize(Int32Ty));
+
+  getThreadID(OMPRegionFn, IRBuilder);
+  
+  IRBuilder.CreateBr(LoopEntry);
+  IRBuilder.SetInsertPoint(LoopEntry->getTerminator());
+
+  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(*OMPRegionFn).getLoopInfo();
+  DominatorTree &DT =
+    getAnalysis<DominatorTreeWrapperPass>(*OMPRegionFn).getDomTree();
+  ScalarEvolution &SE =
+    getAnalysis<ScalarEvolutionWrapperPass>(*OMPRegionFn).getSE();
+  Loop *L = LI.getLoopFor(LoopHeader);
+  auto *LoopExit = L->getExitingBlock();
+  auto *PostLoopExit = *std::next(succ_begin(LoopExit));
+  auto *LatchCount = SE.getExitCount(L, LoopExit);
+  SCEVExpander Exp(SE, DL, "LatchExpander");
+  Exp.setInsertPoint(LoopEntry->getTerminator());
+  auto *LatchCountVal = Exp.expandCodeFor(LatchCount);
+  auto *TripCountVal =
+      IRBuilder.CreateAdd(LatchCountVal, IRBuilder.getInt32(1), "trip.cnt");
+  auto *ExecLoopCmp =
+      IRBuilder.CreateICmpSLT(IRBuilder.getInt32(0), TripCountVal, "exec.loop");
+
+  auto *ExecLoopBB =
+      BasicBlock::Create(C, "omp.exec.loop", OMPRegionFn, LoopHeader);
+
+  IRBuilder.CreateCondBr(ExecLoopCmp, ExecLoopBB, PostLoopExit);
+  LoopEntry->getTerminator()->eraseFromParent();
+
+  IRBuilder.SetInsertPoint(ExecLoopBB);
+  // NOTE I am not sure why the OMP code generatd from clang inits these
+  // variables if the runtime is going to initialize them anyway through the
+  // call to __kmpc_for_static_init_4 right after.
+  IRBuilder.CreateAlignedStore(IRBuilder.getInt32(0), LB,
+                               DL.getTypeAllocSize(Int32Ty));
+  IRBuilder.CreateAlignedStore(LatchCountVal, UB, DL.getTypeAllocSize(Int32Ty));
+  IRBuilder.CreateAlignedStore(IRBuilder.getInt32(1), Stride,
+                               DL.getTypeAllocSize(Int32Ty));
+  IRBuilder.CreateAlignedStore(IRBuilder.getInt32(0), IsLast,
+                               DL.getTypeAllocSize(Int32Ty));
+
+  std::vector<Value *> ForInitArgs = {DefaultOpenMPLocation,
+                                      getThreadID(OMPRegionFn, IRBuilder),
+                                      IRBuilder.getInt32(34),
+                                      IsLast,
+                                      LB,
+                                      UB,
+                                      Stride,
+                                      IRBuilder.getInt32(1),
+                                      IRBuilder.getInt32(1)};
+  emitRuntimeCall(createRuntimeFunction(
+                      OpenMPRuntimeFunction::OMPRTL__kmpc_for_static_init_4, M),
+                  ForInitArgs, "", IRBuilder);
+
+  auto *UBVal = IRBuilder.CreateAlignedLoad(UB, DL.getTypeAllocSize(Int32Ty));
+  auto *UBCmp = IRBuilder.CreateICmpSGT(UBVal, LatchCountVal);
+
+  auto *UBCmpT =
+    BasicBlock::Create(C, "ub.cmp.true", OMPRegionFn, LoopHeader);
+
+  auto *UBCmpF =
+    BasicBlock::Create(C, "ub.cmp.false", OMPRegionFn, LoopHeader);
+
+  auto *LoopPreHeader =
+    BasicBlock::Create(C, "loop.pre.head", OMPRegionFn, LoopHeader);
+
+  IRBuilder.CreateCondBr(UBCmp, UBCmpT, UBCmpF);
+
+  IRBuilder.SetInsertPoint(UBCmpT);
+  IRBuilder.CreateBr(LoopPreHeader);
+
+  IRBuilder.SetInsertPoint(UBCmpF);
+  UBVal = IRBuilder.CreateAlignedLoad(UB, DL.getTypeAllocSize(Int32Ty));
+  IRBuilder.CreateBr(LoopPreHeader);
+
+  IRBuilder.SetInsertPoint(LoopPreHeader);
+  auto* ActualUBVal = IRBuilder.CreatePHI(Int32Ty, 2, "actual.ub");
+  ActualUBVal->addIncoming(LatchCountVal, UBCmpT);
+  ActualUBVal->addIncoming(UBVal, UBCmpF);
+
+  IRBuilder.CreateAlignedStore(ActualUBVal, UB, DL.getTypeAllocSize(Int32Ty));
+  auto *LBVal = IRBuilder.CreateAlignedLoad(LB, DL.getTypeAllocSize(Int32Ty));
+  IRBuilder.CreateAlignedStore(LBVal, IV, DL.getTypeAllocSize(Int32Ty));
+  IRBuilder.CreateBr(LoopHeader);
+
+  // Replace the old canonical iteration variable with the .omp.iv.
+  auto *IndVarPHI = dyn_cast<PHINode>(&*LoopHeader->begin());
+  assert(IndVarPHI && "Couldn't find the loop's canoncial induction variable");
+  IRBuilder.SetInsertPoint(&*std::next(IndVarPHI->getIterator()));
+  auto *IVVal = IRBuilder.CreateAlignedLoad(IV, DL.getTypeAllocSize(Int32Ty));
+  IndVarPHI->replaceAllUsesWith(IVVal);
+  IndVarPHI->eraseFromParent();
+
+  auto *LatchCmp = dyn_cast<ICmpInst>(
+      dyn_cast<BranchInst>(LoopExit->getTerminator())->getCondition());
+  auto *IndVarInc = dyn_cast<BinaryOperator>(LatchCmp->getOperand(0));
+  assert(IndVarInc->getOpcode() == Instruction::Add);
+  IRBuilder.SetInsertPoint(&*std::next(IndVarInc->getIterator()));
+  IRBuilder.CreateAlignedStore(IndVarInc, IV, DL.getTypeAllocSize(Int32Ty));
+  UBVal = IRBuilder.CreateAlignedLoad(UB, DL.getTypeAllocSize(Int32Ty));
+  auto *NewLatchCmp = IRBuilder.CreateICmpSLE(IndVarInc, UBVal);
+  LatchCmp->replaceAllUsesWith(NewLatchCmp);
+  LatchCmp->eraseFromParent();
+
+  IRBuilder.SetInsertPoint(&*PostLoopExit->getTerminator());
+
+  std::vector<Value *> FiniArgs = {DefaultOpenMPLocation,
+                                   getThreadID(OMPRegionFn, IRBuilder)};
+  emitRuntimeCall(createRuntimeFunction(
+                      OpenMPRuntimeFunction::OMPRTL__kmpc_for_static_fini, M),
+                  FiniArgs, "", IRBuilder);
+  emitRuntimeCall(
+      createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_barrier, M),
+      FiniArgs, "", IRBuilder);
 }
 
 void PIRToOpenMPPass::emitOMPRegionLogic(
@@ -1365,6 +1544,7 @@ Function *PIRToOpenMPPass::emitTaskFunction(const ParallelRegion &PR,
   return PTFunction;
 }
 
+
 char PIRToOpenMPPass::ID = 0;
 
 INITIALIZE_PASS_BEGIN(PIRToOpenMPPass, "pir2omp", "Lower PIR to OpenMP", true,
@@ -1374,5 +1554,5 @@ INITIALIZE_PASS_END(PIRToOpenMPPass, "pir2omp", "Lower PIR to OpenMP", true,
                     true)
 
 namespace llvm {
-FunctionPass *createPIRToOpenMPPass() { return new PIRToOpenMPPass(); }
+ModulePass *createPIRToOpenMPPass() { return new PIRToOpenMPPass(); }
 } // namespace llvm

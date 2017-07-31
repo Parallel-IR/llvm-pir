@@ -67,10 +67,12 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm/Analysis/ScalarEvolution.h"
 
 namespace llvm {
 enum OpenMPRuntimeFunction {
   OMPRTL__kmpc_fork_call,
+  OMPRTL__kmpc_for_static_init_4,
   OMPRTL__kmpc_for_static_fini,
   OMPRTL__kmpc_master,
   OMPRTL__kmpc_end_master,
@@ -85,21 +87,23 @@ enum OpenMPSchedType {
   OMP_sch_static = 34,
 };
 
-class PIRToOpenMPPass : public FunctionPass {
+class PIRToOpenMPPass : public ModulePass {
 public:
   static char ID;
 
-  PIRToOpenMPPass() : FunctionPass(ID) {}
+  PIRToOpenMPPass() : ModulePass(ID) {}
 
-  bool runOnFunction(Function &F) override;
+  bool runOnModule(Module &M) override;
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
   void print(raw_ostream &OS, const Module *) const override;
   void dump() const;
+  bool verifyExtractedFn(Function *Fn) const;
 
 private:
   void startRegionEmission(const ParallelRegion &PR, LoopInfo &LI,
-                           const DominatorTree &DT);
+                           DominatorTree &DT,
+                           ScalarEvolution &SE);
 
   void removePIRInstructions(ForkInst &ForkInst, const ParallelTask &ForkedTask,
                              const ParallelTask &ContTask);
@@ -107,10 +111,12 @@ private:
   Function *declareOMPRegionFn(Function *RegionFn, bool Nested,
                                ValueToValueMapTy &VMap);
 
-  void replaceExtractedRegionFnCall(CallInst *CI, Function *OMPRegionFn);
+  std::pair<CallInst *, CallInst *>
+  replaceExtractedRegionFnCall(CallInst *CI, Function *OMPRegionFn,
+                               Function *OMPNestedRegionFn);
 
-  void replaceExtractedRegionFnCall(CallInst *CI, Function *OMPRegionFn,
-                                    Function *OMPNestedRegionFn);
+  void emitOMPRegionFn(Function *OMPRegionFn, Function *LoopFn,
+                       ValueToValueMapTy &VMap, bool Nested);
 
   void emitOMPRegionFn(Function *OMPRegionFn, Function *ForkedFn,
                        Function *ContFn,
@@ -132,6 +138,12 @@ private:
                                                  IRBuilder<> &StoreIRBuilder,
                                                  bool Nested);
   /* void emitImplicitArgs(BasicBlock *PRFuncEntryBB); */
+
+  void emitOMPRegionLogic(Function *OMPRegionFn, IRBuilder<> &IRBuilder,
+                          llvm::IRBuilder<> &AllocaIRBuilder,
+                          BasicBlock *LoopEntry,
+                          DenseMap<Argument *, Value *> ParamToAllocaMap,
+                          bool Nested);
 
   void emitOMPRegionLogic(Function *OMPRegionFn, IRBuilder<> &IRBuilder,
                           llvm::IRBuilder<> &AllocaIRBuilder,
