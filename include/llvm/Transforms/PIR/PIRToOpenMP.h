@@ -98,9 +98,10 @@ public:
 
   void print(raw_ostream &OS, const Module *) const override;
   void dump() const;
-  bool verifyExtractedFn(Function *Fn) const;
 
 private:
+  bool verifyExtractedFn(Function *Fn) const;
+
   void startRegionEmission(const ParallelRegion &PR, LoopInfo &LI,
                            DominatorTree &DT,
                            ScalarEvolution &SE);
@@ -213,14 +214,6 @@ private:
   // Maps an outlined task function to its corresponding task entry function.
   typedef DenseMap<Function *, Function *> OutlinedToEntryMapTy;
   OutlinedToEntryMapTy OutlinedToEntryMap;
-};
-
-class PIRToOMPPass : public PassInfoMixin<PIRToOMPPass> {
-  static StringRef name() { return "PIRToOMPPass"; }
-
-  PIRToOMPPass() {}
-
-  void run(Function &F, FunctionAnalysisManager &AM);
 };
 } // namespace llvm
 

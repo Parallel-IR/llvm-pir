@@ -127,10 +127,6 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     auto &ForkedTask = PR.getForkedTask();
     auto &ContTask = PR.getContinuationTask();
 
-    // llvm::errs() << "*** SCEV loop exit: \n";
-    // auto *EC = SE.getExitCount(L, L->getExitingBlock());
-    // EC->dump();
-
     // If a value is:
     //   1. Used inside the loop.
     //   2. Defined outside the loop.
@@ -172,23 +168,8 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     auto ArgIt = ExtractedFnCI->arg_begin();
     auto &LoopFnEntryBB = LoopFn->getEntryBlock();
 
-    // Value *AllocaInsertPt;
-    // for (auto &I : LoopFnEntryBB) {
-    //   errs() << "I: " << I << "\n";
-    //   if (dyn_cast<AllocaInst>(&I)) {
-    //     continue;
-    //   } else {
-    //     AllocaInsertPt = &I;
-    //     break;
-    //   }
-    // }
-    // errs() << "InsertPt: " << *AllocaInsertPt << "\n";
-    // IRBuilder<> AllocaIRBuilder(&LoopFnEntryBB,
-    //                             ((Instruction *)AllocaInsertPt)->getIterator());
-
     IRBuilder<> IRBuilder(&LoopFnEntryBB,
                           LoopFnEntryBB.getTerminator()->getIterator());
-    // IRBuilder.CreateStore(ParamVal, CloneAlloca);
 
     while (ArgIt != ExtractedFnCI->arg_end()) {
       if (std::find(DemotedAllocas.begin(), DemotedAllocas.end(), *ArgIt) !=
@@ -199,13 +180,6 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
 
         auto *ParamVal = IRBuilder.CreateLoad(&*ParamIt);
         auto *ParamType = (PointerType*)ParamIt->getType();
-
-        // auto *CloneAlloca = AllocaIRBuilder.CreateAlloca(
-        //     ParamType->getElementType(), nullptr,
-        //     ParamIt->getName() + ".clone");
-        // ParamIt->replaceAllUsesWith(CloneAlloca);
-        // errs() << "isAllocaPromotable: " << isAllocaPromotable(CloneAlloca)
-        //        << "\n";
 
         for (auto &U : ParamIt->uses()) {
           if (auto *UI = dyn_cast<Instruction>(U.getUser())) {
@@ -225,52 +199,9 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     // nested functions.
     replaceExtractedRegionFnCall(ExtractedFnCI, OMPLoopFn, OMPNestedLoopFn);
 
-    // llvm::errs() << "SCEV again:\n";
-    // EC->dump();
-
     emitOMPRegionFn(OMPLoopFn, LoopFn, VMap, false);
 
     emitOMPRegionFn(OMPNestedLoopFn, LoopFn, NestedVMap, true);
-
-    // auto *Module = OMPLoopFn->getParent();
-    // auto &Context = Module->getContext();
-    // DataLayout DL(OMPLoopFn->getParent());
-
-    // auto *EntryBB = BasicBlock::Create(Context, "entry", OMPLoopFn, nullptr);
-    // auto Int32Ty = Type::getInt32Ty(Context);
-    // Value *Undef = UndefValue::get(Int32Ty);
-    // auto *AllocaInsertPt = new BitCastInst(Undef, Int32Ty, "allocapt", EntryBB);
-    // IRBuilder<> AllocaIRBuilder(EntryBB,
-    //                             ((Instruction *)AllocaInsertPt)->getIterator());
-
-    // IRBuilder<> StoreIRBuilder(EntryBB);
-    // auto ParamToAllocaMap =
-    //   emitImplicitArgs(OMPLoopFn, AllocaIRBuilder, StoreIRBuilder, false);
-
-    // auto CapturedArgIt = ParamToAllocaMap.begin();
-
-    // // For each captured variable, emit a LoadInst and add it to
-    // // ForkedCapArgsLoads and/or ContCapArgsLoads as needed.
-    // while (CapturedArgIt != ParamToAllocaMap.end()) {
-    //   auto *CapturedArgLoad = StoreIRBuilder.CreateAlignedLoad(
-    //       CapturedArgIt->second,
-    //       DL.getTypeAllocSize(
-    //           CapturedArgIt->second->getType()->getPointerElementType()));
-    //   ++CapturedArgIt;
-    // }
-
-    // AllocaInsertPt->eraseFromParent();
-
-    // std::vector<Value *> BarrierArgs = {DefaultOpenMPLocation,
-    //                                     getThreadID(OMPLoopFn, StoreIRBuilder)};
-    // emitRuntimeCall(createRuntimeFunction(
-    //                     OpenMPRuntimeFunction::OMPRTL__kmpc_barrier, Module),
-    //                 BarrierArgs, "", StoreIRBuilder);
-
-    // StoreIRBuilder.CreateRetVoid();
-    
-    // errs() << "OMPRegionFn: \n";
-    // OMPLoopFn->dump();
   } else {
     // errs() << "Parallel Region:\n";
     // Split the fork instruction parent into 2 BBs to satisfy the assumption
@@ -1498,10 +1429,6 @@ FunctionType *PIRToOpenMPPass::getOrCreateKmpc_MicroTy(LLVMContext &Context) {
 
 PointerType *PIRToOpenMPPass::getKmpc_MicroPointerTy(LLVMContext &Context) {
   return PointerType::getUnqual(getOrCreateKmpc_MicroTy(Context));
-}
-
-void PIRToOMPPass::run(Function &F, FunctionAnalysisManager &AM) {
-  // auto &PRI = AM.getResult<ParallelRegionAnalysis>(F);
 }
 
 /// Emits the outlined function corresponding to the parallel task (whehter
