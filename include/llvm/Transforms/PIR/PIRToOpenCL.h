@@ -21,6 +21,10 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 
 namespace llvm {
+enum OpenCLBuiltInFunction {
+  OCL__get_global_id,
+};
+
 class PIRToOpenCLPass : public ModulePass {
 public:
   static char ID;
@@ -45,6 +49,8 @@ private:
   Function *declareOCLRegionFn(Function *RegionFn, ValueToValueMapTy &VMap);
 
   int emitKernelFile(Module *M, Function *OCLKernel, std::ostream &Out);
+
+  Constant *createBuiltInFunction(OpenCLBuiltInFunction Function, Module *M);
 
 private:
   ParallelRegionInfo *PRI = nullptr;

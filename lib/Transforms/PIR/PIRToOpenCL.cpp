@@ -75,6 +75,9 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
 
   auto &ForkInst = PR.getFork();
   Function *SpawningFn = ForkInst.getParent()->getParent();
+  auto *M = SpawningFn->getParent();
+
+  auto *Int32Ty = Type::getInt32Ty(M->getContext());
 
   if (IsParallelLoop) {
     auto *CIV = L->getCanonicalInductionVariable();
@@ -86,6 +89,26 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
 
     auto &ForkedTask = PR.getForkedTask();
     auto &ContTask = PR.getContinuationTask();
+    auto &ForkedEntry = ForkedTask.getEntry();
+
+    auto *WorkItemID = CallInst::Create(
+        createBuiltInFunction(OpenCLBuiltInFunction::OCL__get_global_id, M),
+        {ConstantInt::get(Int32Ty, 0)}, None, "wi_id", &*ForkedEntry.begin());
+    Value *WorkItemIDCast = nullptr;
+
+    if (CIV->getType()->getScalarSizeInBits() <
+        WorkItemID->getType()->getScalarSizeInBits()) {
+      WorkItemIDCast = new TruncInst(WorkItemID, CIV->getType(), "",
+                                     &*std::next(WorkItemID->getIterator()));
+    } else if (CIV->getType()->getScalarSizeInBits() >
+               WorkItemID->getType()->getScalarSizeInBits()) {
+      WorkItemIDCast =
+          CastInst::CreateZExtOrBitCast(WorkItemID, CIV->getType(), "",
+                                        &*std::next(WorkItemID->getIterator()));
+    }
+
+    CIV->replaceAllUsesWith(WorkItemIDCast);
+
     std::vector<BasicBlock *> LoopBodyBBs;
 
     ParallelTask::VisitorTy ForkedVisitor = [&LoopBodyBBs](
@@ -131,7 +154,6 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
                          });
     };
 
-    auto *M = OCLKernelFn->getParent();
     std::unique_ptr<Module> New =
         llvm::make_unique<Module>(M->getModuleIdentifier(), M->getContext());
     New->setDataLayout(M->getDataLayout());
@@ -177,8 +199,8 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
     emitKernelFile(&*New, OCLKernelFn, *OutStream);
     delete OutStream;
 
-    // DUMP(LoopFn);
-    // DUMP(OCLKernelFn);
+    DUMP(LoopBodyFn);
+    DUMP(OCLKernelFn);
     New->dump();
   } else {
     assert(false && "Non-Loop regions are not supported yet!");
@@ -294,6 +316,24 @@ int PIRToOpenCLPass::emitKernelFile(Module *M, Function *OCLKernel,
   axtor::translateModule(Backend, ModInfo);
 
   return 0;
+}
+
+Constant *PIRToOpenCLPass::createBuiltInFunction(OpenCLBuiltInFunction Function,
+                                                 Module *M) {
+  Constant *OCLFn = nullptr;
+  auto *SizeTy = Type::getInt64Ty(M->getContext());
+  auto *Int32Ty = Type::getInt32Ty(M->getContext());
+
+  switch (Function) {
+  case OCL__get_global_id: {
+    Type *TypeParams[] = {Int32Ty};
+    FunctionType *FnTy = FunctionType::get(SizeTy, TypeParams, false);
+    OCLFn = M->getOrInsertFunction("get_global_id", FnTy);
+    break;
+  }
+  }
+
+  return OCLFn;
 }
 
 void PIRToOpenCLPass::getAnalysisUsage(AnalysisUsage &AU) const {
