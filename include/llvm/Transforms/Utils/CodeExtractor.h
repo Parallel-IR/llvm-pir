@@ -16,6 +16,7 @@
 #define LLVM_TRANSFORMS_UTILS_CODEEXTRACTOR_H
 
 #include "llvm/ADT/SetVector.h"
+#include "llvm/ADT/Twine.h"
 
 namespace llvm {
 template <typename T> class ArrayRef;
@@ -58,6 +59,8 @@ template <typename T> class ArrayRef;
     unsigned NumExitBlocks;
     Type *RetTy;
 
+    const Twine *Name;
+
   public:
 
     /// \brief Check to see if a block is valid for extraction.
@@ -71,7 +74,7 @@ template <typename T> class ArrayRef;
     /// block is set up for extraction.
     CodeExtractor(BasicBlock *BB, bool AggregateArgs = false,
                   BlockFrequencyInfo *BFI = nullptr,
-                  BranchProbabilityInfo *BPI = nullptr);
+                  BranchProbabilityInfo *BPI = nullptr, const Twine &Name = "");
 
     /// \brief Create a code extractor for a sequence of blocks.
     ///
@@ -81,7 +84,7 @@ template <typename T> class ArrayRef;
     /// extra checking and transformations are enabled.
     CodeExtractor(ArrayRef<BasicBlock *> BBs, DominatorTree *DT = nullptr,
                   bool AggregateArgs = false, BlockFrequencyInfo *BFI = nullptr,
-                  BranchProbabilityInfo *BPI = nullptr);
+                  BranchProbabilityInfo *BPI = nullptr, const Twine &Name = "");
 
     /// \brief Create a code extractor for a loop body.
     ///
@@ -89,7 +92,7 @@ template <typename T> class ArrayRef;
     /// block sequence of the loop.
     CodeExtractor(DominatorTree &DT, Loop &L, bool AggregateArgs = false,
                   BlockFrequencyInfo *BFI = nullptr,
-                  BranchProbabilityInfo *BPI = nullptr);
+                  BranchProbabilityInfo *BPI = nullptr, const Twine &Name = "");
 
     /// \brief Create a code extractor for a region node.
     ///
@@ -97,7 +100,7 @@ template <typename T> class ArrayRef;
     /// block sequence of the region node passed in.
     CodeExtractor(DominatorTree &DT, const RegionNode &RN,
                   bool AggregateArgs = false, BlockFrequencyInfo *BFI = nullptr,
-                  BranchProbabilityInfo *BPI = nullptr);
+                  BranchProbabilityInfo *BPI = nullptr, const Twine &Name = "");
 
     /// \brief Perform the extraction, returning the new function.
     ///

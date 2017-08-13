@@ -126,28 +126,31 @@ buildExtractionBlockSet(const RegionNode &RN) {
 
 CodeExtractor::CodeExtractor(BasicBlock *BB, bool AggregateArgs,
                              BlockFrequencyInfo *BFI,
-                             BranchProbabilityInfo *BPI)
+                             BranchProbabilityInfo *BPI, const Twine &Name)
     : DT(nullptr), AggregateArgs(AggregateArgs || AggregateArgsOpt), BFI(BFI),
-      BPI(BPI), Blocks(buildExtractionBlockSet(BB)), NumExitBlocks(~0U) {}
+      BPI(BPI), Blocks(buildExtractionBlockSet(BB)), NumExitBlocks(~0U),
+      Name(&Name) {}
 
 CodeExtractor::CodeExtractor(ArrayRef<BasicBlock *> BBs, DominatorTree *DT,
                              bool AggregateArgs, BlockFrequencyInfo *BFI,
-                             BranchProbabilityInfo *BPI)
+                             BranchProbabilityInfo *BPI, const Twine &Name)
     : DT(DT), AggregateArgs(AggregateArgs || AggregateArgsOpt), BFI(BFI),
-      BPI(BPI), Blocks(buildExtractionBlockSet(BBs)), NumExitBlocks(~0U) {}
+      BPI(BPI), Blocks(buildExtractionBlockSet(BBs)), NumExitBlocks(~0U),
+      Name(&Name) {}
 
 CodeExtractor::CodeExtractor(DominatorTree &DT, Loop &L, bool AggregateArgs,
                              BlockFrequencyInfo *BFI,
-                             BranchProbabilityInfo *BPI)
+                             BranchProbabilityInfo *BPI, const Twine &Name)
     : DT(&DT), AggregateArgs(AggregateArgs || AggregateArgsOpt), BFI(BFI),
       BPI(BPI), Blocks(buildExtractionBlockSet(L.getBlocks())),
-      NumExitBlocks(~0U) {}
+      NumExitBlocks(~0U), Name(&Name) {}
 
 CodeExtractor::CodeExtractor(DominatorTree &DT, const RegionNode &RN,
                              bool AggregateArgs, BlockFrequencyInfo *BFI,
-                             BranchProbabilityInfo *BPI)
+                             BranchProbabilityInfo *BPI, const Twine &Name)
     : DT(&DT), AggregateArgs(AggregateArgs || AggregateArgsOpt), BFI(BFI),
-      BPI(BPI), Blocks(buildExtractionBlockSet(RN)), NumExitBlocks(~0U) {}
+      BPI(BPI), Blocks(buildExtractionBlockSet(RN)), NumExitBlocks(~0U),
+      Name(&Name) {}
 
 /// definedInRegion - Return true if the specified value is defined in the
 /// extracted region.
@@ -344,10 +347,11 @@ Function *CodeExtractor::constructFunction(const ValueSet &inputs,
                   FunctionType::get(RetTy, paramTy, false);
 
   // Create the new function
-  Function *newFunction = Function::Create(funcType,
-                                           GlobalValue::InternalLinkage,
-                                           oldFunction->getName() + "_" +
-                                           header->getName(), M);
+  Function *newFunction = Function::Create(
+      funcType, GlobalValue::InternalLinkage,
+      (Name->str() == "") ? oldFunction->getName() + "_" + header->getName()
+                        : *Name,
+      M);
   // If the old function is no-throw, so is the new one.
   if (oldFunction->doesNotThrow())
     newFunction->setDoesNotThrow();
