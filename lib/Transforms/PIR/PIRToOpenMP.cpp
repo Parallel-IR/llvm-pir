@@ -120,6 +120,9 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     auto *CIV = L->getCanonicalInductionVariable();
     assert(CIV && "Non-canonical loop");
 
+    auto *PreHeader = L->getLoopPreheader();
+    DUMP(PreHeader);
+
     auto *LoopLatch = L->getLoopLatch();
     assert(LoopLatch &&
            "Only parallel loops with a single latch are supported.");
@@ -127,18 +130,27 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     auto &ForkedTask = PR.getForkedTask();
     auto &ContTask = PR.getContinuationTask();
 
+    std::vector<BasicBlock *> LoopAndPreHeader;
+    LoopAndPreHeader.push_back(PreHeader);
+ 
+    for (auto *BB : L->blocks()) {
+      LoopAndPreHeader.push_back(BB);
+    }
+
     // If a value is:
     //   1. Used inside the loop.
-    //   2. Defined outside the loop.
+    //   2. Defined outside the loop (the loop here includes the PreHeader)
     // then, demote that value to memory so that it can be shared across
     // the serial/parallel region.
     // TODO this should be done for non-loop regions as well.
     std::vector<AllocaInst *> DemotedAllocas;
-    for (auto *BB : L->blocks()) {
+    for (auto *BB : LoopAndPreHeader) {
       for (auto &I : *BB) {
         for (auto &U : I.operands()) {
           if (auto *I2 = dyn_cast<Instruction>(&*U)) {
-            if (!L->contains(I2) /*&& !I2->getType()->isPointerTy()*/) {
+            if (!L->contains(I2) &&
+                I2->getParent() !=
+                    PreHeader /*&& !I2->getType()->isPointerTy()*/) {
               DemotedAllocas.push_back(DemoteRegToStack(*I2));
             }
           }
@@ -146,11 +158,22 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
       }
     }
 
+    DUMP(PreHeader);
+    
     removePIRInstructions(ForkInst, ForkedTask, ContTask);
 
-    CodeExtractor LoopExtractor(DT, *L);
+    CodeExtractor LoopExtractor(LoopAndPreHeader, &DT);
     Function *LoopFn = LoopExtractor.extractCodeRegion();
-    assert(verifyExtractedFn(LoopFn));
+    bool MergeRes =
+        MergeBlockIntoPredecessor(LoopFn->getEntryBlock().getSingleSuccessor());
+    assert(MergeRes && "Couldn't merge the preheader");
+
+    if (LoopFn) {
+      DUMP(LoopFn);
+    } else {
+      errs() << "nothing\n";
+    }
+    // assert(verifyExtractedFn(LoopFn));
 
     // Create the outlined function that contains the OpenMP calls required for
     // outermost regions. This corresponds to the "if (omp_get_num_threads() ==

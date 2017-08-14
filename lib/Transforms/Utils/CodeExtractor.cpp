@@ -61,7 +61,7 @@ bool CodeExtractor::isBlockValidForExtraction(const BasicBlock &BB) {
 
   // Don't hoist code containing allocas, invokes, or vastarts.
   for (BasicBlock::const_iterator I = BB.begin(), E = BB.end(); I != E; ++I) {
-    if (isa<AllocaInst>(I) || isa<InvokeInst>(I))
+    if (/*isa<AllocaInst>(I) || */isa<InvokeInst>(I))
       return false;
     if (const CallInst *CI = dyn_cast<CallInst>(I))
       if (const Function *F = CI->getCalledFunction())
@@ -87,6 +87,8 @@ static SetVector<BasicBlock *> buildExtractionBlockSet(IteratorT BBBegin,
       llvm_unreachable("Repeated basic blocks in extraction input");
 
     if (!CodeExtractor::isBlockValidForExtraction(**BBBegin)) {
+      errs() << "Invalid block: ";
+      (**BBBegin).dump();
       Result.clear();
       return Result;
     }
@@ -751,6 +753,7 @@ void CodeExtractor::calculateNewCallTerminatorWeights(
 Function *CodeExtractor::extractCodeRegion() {
   if (!isEligible())
     return nullptr;
+  errs() << "eligible\n";
 
   ValueSet inputs, outputs;
 
