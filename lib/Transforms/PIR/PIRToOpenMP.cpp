@@ -151,6 +151,11 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
             if (!L->contains(I2) &&
                 I2->getParent() !=
                     PreHeader /*&& !I2->getType()->isPointerTy()*/) {
+              // No need to demote what hasn't been promoted in the first place.
+              if (dyn_cast<AllocaInst>(I2) &&
+                  !PR.getPRI().isSafeToPromote(*dyn_cast<AllocaInst>(I2), DT)) {
+                continue;
+              }
               DemotedAllocas.push_back(DemoteRegToStack(*I2));
             }
           }

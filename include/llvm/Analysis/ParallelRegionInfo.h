@@ -366,6 +366,9 @@ public:
   const ParallelTask &getContinuationTask() const { return ContinuationTask; }
   ///}
 
+  ParallelRegionInfo &getPRI() { return PRI; }
+  const ParallelRegionInfo &getPRI() const { return PRI; }
+
   /// A generic visitor interface as an alternative to an iterator.
   /// See ParallelTask::visit for more information
   ///{
