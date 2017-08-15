@@ -130,12 +130,24 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     auto &ForkedTask = PR.getForkedTask();
     auto &ContTask = PR.getContinuationTask();
 
-    std::vector<BasicBlock *> LoopAndPreHeader;
-    LoopAndPreHeader.push_back(PreHeader);
+    std::vector<BasicBlock *> RegionBBs;
+    // Include the preheader which is required for private and firstprivate
+    // support.
+    RegionBBs.push_back(PreHeader);
  
     for (auto *BB : L->blocks()) {
-      LoopAndPreHeader.push_back(BB);
+      RegionBBs.push_back(BB);
     }
+
+    assert(ContTask.getHaltsOrJoints().size() == 1 &&
+           "Only 1 join per loop is currently supported\n");
+
+    // Include the join and post join blocks which are required for lastprivate
+    // support.
+    auto *JoinBB = ContTask.getHaltsOrJoints()[0]->getParent();
+    auto *PostJoinBB = JoinBB->getSingleSuccessor();
+    RegionBBs.push_back(JoinBB);
+    RegionBBs.push_back(PostJoinBB);
 
     // If a value is:
     //   1. Used inside the loop.
@@ -170,13 +182,13 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     
     removePIRInstructions(ForkInst, ForkedTask, ContTask);
 
-    CodeExtractor LoopExtractor(LoopAndPreHeader, &DT);
+    CodeExtractor LoopExtractor(RegionBBs, &DT);
     Function *LoopFn = LoopExtractor.extractCodeRegion();
     bool MergeRes =
         MergeBlockIntoPredecessor(LoopFn->getEntryBlock().getSingleSuccessor());
     assert(MergeRes && "Couldn't merge the preheader");
 
-    // DUMP(LoopFn);
+    DUMP(LoopFn);
     // assert(verifyExtractedFn(LoopFn));
 
     // Create the outlined function that contains the OpenMP calls required for
@@ -222,7 +234,7 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
       ++ArgIt;
     }
     
-    // DUMP(LoopFn);
+    DUMP(LoopFn);
 
     // Replace ExtractedFnCI with an if-else region that calls the outermost and
     // nested functions.
@@ -898,6 +910,23 @@ void PIRToOpenMPPass::emitOMPRegionLogic(
   emitRuntimeCall(
       createRuntimeFunction(OpenMPRuntimeFunction::OMPRTL__kmpc_barrier, M),
       FiniArgs, "", IRBuilder);
+
+  auto *PostJoinBB = PostLoopExit->getSingleSuccessor();
+  assert(PostJoinBB);
+  
+  auto *ExitBB =
+    BasicBlock::Create(C, "exit", OMPRegionFn);
+
+  auto *IsLastVal =
+      IRBuilder.CreateAlignedLoad(IsLast, DL.getTypeAllocSize(Int32Ty));
+  auto *IsLastCmp = IRBuilder.CreateICmpNE(IsLastVal, IRBuilder.getInt32(0));
+  // Post-join BB is only executed by the thread executing the last iteration.
+  // This is where the finalization logic required by lastprivate is found.
+  IRBuilder.CreateCondBr(IsLastCmp, PostJoinBB, ExitBB);
+  PostLoopExit->getTerminator()->eraseFromParent();
+
+  IRBuilder.SetInsertPoint(ExitBB);
+  IRBuilder.CreateRetVoid();
 }
 
 void PIRToOpenMPPass::emitOMPRegionLogic(
