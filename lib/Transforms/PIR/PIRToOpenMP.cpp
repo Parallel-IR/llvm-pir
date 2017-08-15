@@ -139,12 +139,15 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
 
     // If a value is:
     //   1. Used inside the loop.
-    //   2. Defined outside the loop (the loop here includes the PreHeader)
+    //   2. Defined outside the loop
     // then, demote that value to memory so that it can be shared across
     // the serial/parallel region.
     // TODO this should be done for non-loop regions as well.
+    // NOTE We don't need to do this for the preheader. For example, in case
+    // of a firstprivate clause, we need to share the variable intentionally
+    // by value.
     std::vector<AllocaInst *> DemotedAllocas;
-    for (auto *BB : LoopAndPreHeader) {
+    for (auto *BB : L->blocks()) {
       for (auto &I : *BB) {
         for (auto &U : I.operands()) {
           if (auto *I2 = dyn_cast<Instruction>(&*U)) {
@@ -173,11 +176,7 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
         MergeBlockIntoPredecessor(LoopFn->getEntryBlock().getSingleSuccessor());
     assert(MergeRes && "Couldn't merge the preheader");
 
-    if (LoopFn) {
-      DUMP(LoopFn);
-    } else {
-      errs() << "nothing\n";
-    }
+    // DUMP(LoopFn);
     // assert(verifyExtractedFn(LoopFn));
 
     // Create the outlined function that contains the OpenMP calls required for
@@ -223,6 +222,8 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
       ++ArgIt;
     }
     
+    // DUMP(LoopFn);
+
     // Replace ExtractedFnCI with an if-else region that calls the outermost and
     // nested functions.
     replaceExtractedRegionFnCall(ExtractedFnCI, OMPLoopFn, OMPNestedLoopFn);
@@ -427,10 +428,15 @@ Function *PIRToOpenMPPass::declareOMPRegionFn(Function *RegionFn, bool Nested,
     FnArgNames.push_back(Arg.getName());
 
     // Allow speculative loading from shared data.
-    AttrBuilder B;
-    B.addDereferenceableAttr(
-        DL.getTypeAllocSize(Arg.getType()->getPointerElementType()));
-    FnArgAttrs.push_back(AttributeSet::get(Context, ++ArgOffset, B));
+    if (Arg.getType()->isPointerTy()) {
+      AttrBuilder B;
+      B.addDereferenceableAttr(
+          DL.getTypeAllocSize(Arg.getType()->getPointerElementType()));
+      FnArgAttrs.push_back(AttributeSet::get(Context, ++ArgOffset, B));
+    } else {
+      FnArgAttrs.push_back(AttributeSet());
+      ++ArgOffset;
+    }
   }
 
   // Create the function and set its argument properties.
@@ -445,7 +451,9 @@ Function *PIRToOpenMPPass::declareOMPRegionFn(Function *RegionFn, bool Nested,
   auto ArgNameIt = FnArgNames.begin();
 
   for (auto &ArgAttr : FnArgAttrs) {
-    (*ArgIt).addAttr(ArgAttr);
+    if (!ArgAttr.isEmpty()) {
+      (*ArgIt).addAttr(ArgAttr);
+    }
     (*ArgIt).setName(*ArgNameIt);
     ++ArgIt;
     ++ArgNameIt;
