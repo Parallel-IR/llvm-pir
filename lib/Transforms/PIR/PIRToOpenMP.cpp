@@ -121,8 +121,6 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
     assert(CIV && "Non-canonical loop");
 
     auto *PreHeader = L->getLoopPreheader();
-    DUMP(PreHeader);
-
     auto *LoopLatch = L->getLoopLatch();
     assert(LoopLatch &&
            "Only parallel loops with a single latch are supported.");
@@ -171,6 +169,12 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
                   !PR.getPRI().isSafeToPromote(*dyn_cast<AllocaInst>(I2), DT)) {
                 continue;
               }
+
+              // Don't demote what has been already demoted.
+              if (std::count(DemotedAllocas.begin(), DemotedAllocas.end(), I2)) {
+                continue;
+              }
+
               DemotedAllocas.push_back(DemoteRegToStack(*I2));
             }
           }
@@ -178,8 +182,6 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
       }
     }
 
-    DUMP(PreHeader);
-    
     removePIRInstructions(ForkInst, ForkedTask, ContTask);
 
     CodeExtractor LoopExtractor(RegionBBs, &DT);
@@ -188,7 +190,6 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
         MergeBlockIntoPredecessor(LoopFn->getEntryBlock().getSingleSuccessor());
     assert(MergeRes && "Couldn't merge the preheader");
 
-    DUMP(LoopFn);
     // assert(verifyExtractedFn(LoopFn));
 
     // Create the outlined function that contains the OpenMP calls required for
@@ -234,7 +235,6 @@ void PIRToOpenMPPass::startRegionEmission(const ParallelRegion &PR,
       ++ArgIt;
     }
     
-    DUMP(LoopFn);
 
     // Replace ExtractedFnCI with an if-else region that calls the outermost and
     // nested functions.
