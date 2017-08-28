@@ -753,7 +753,6 @@ void CodeExtractor::calculateNewCallTerminatorWeights(
 Function *CodeExtractor::extractCodeRegion() {
   if (!isEligible())
     return nullptr;
-  errs() << "eligible\n";
 
   ValueSet inputs, outputs;
 
