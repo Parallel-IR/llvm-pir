@@ -69,6 +69,28 @@ static void copyComdat(GlobalObject *Dst, const GlobalObject *Src) {
 void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
                                           LoopInfo &LI, DominatorTree &DT,
                                           ScalarEvolution &SE) {
+  // A utility function used to find calls that replace extracted parallel
+  // region function.
+  auto FindCallToExtractedFn = [](Function *SpawningFn,
+                                  Function *ExtractedFn) {
+    // Find the call instruction to the extracted region function: RegionFn.
+    CallInst *ExtractedFnCI = nullptr;
+    for (auto &BB : *SpawningFn) {
+      if (CallInst *CI = dyn_cast<CallInst>(BB.begin())) {
+        // NOTE: I use pointer equality here, is that fine?
+        if (ExtractedFn == CI->getCalledFunction()) {
+          ExtractedFnCI = CI;
+          break;
+        }
+      }
+    }
+
+    assert(ExtractedFnCI != nullptr &&
+           "Couldn't find the call to the extracted region function!");
+
+    return ExtractedFnCI;
+  };
+
   // Check if \p PR is a parallel loop
   Loop *L = LI.getLoopFor(PR.getFork().getParent());
   bool IsParallelLoop = (L && PR.isParallelLoopRegion(*L, DT));
@@ -76,6 +98,7 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
   auto &ForkInst = PR.getFork();
   Function *SpawningFn = ForkInst.getParent()->getParent();
   auto *M = SpawningFn->getParent();
+  DataLayout DL(M);
 
   auto *Int32Ty = Type::getInt32Ty(M->getContext());
 
@@ -86,6 +109,15 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
     auto *LoopLatch = L->getLoopLatch();
     assert(LoopLatch &&
            "Only parallel loops with a single latch are supported.");
+
+    auto *LoopPreHeader = L->getLoopPreheader();
+    auto *LoopHeader = L->getHeader();
+    auto *LoopExit = L->getExitBlock();
+
+    auto *LatchCount = SE.getExitCount(L, L->getExitingBlock());
+    SCEVExpander Exp(SE, DL, "LatchExpander");
+    Exp.setInsertPoint(&*LoopHeader->begin());
+    auto *LatchCountVal = Exp.expandCodeFor(LatchCount);
 
     auto &ForkedTask = PR.getForkedTask();
     auto &ContTask = PR.getContinuationTask();
@@ -121,8 +153,9 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
     removePIRInstructions(ForkInst, ForkedTask, ContTask);
 
     CodeExtractor LoopBodyExtractor(LoopBodyBBs, &DT, false, nullptr, nullptr,
-                                "pir_loop_body");
+                                    SpawningFn->getName() + "_loop_body");
     Function *LoopBodyFn = LoopBodyExtractor.extractCodeRegion();
+    auto *ExtractedFnCall = FindCallToExtractedFn(SpawningFn, LoopBodyFn);
 
     ValueToValueMapTy VMap;
     Function *OCLKernelFn = declareOCLRegionFn(LoopBodyFn, VMap);
@@ -130,6 +163,7 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
     SmallVector<ReturnInst*, 1> Returns;
     CloneFunctionInto(OCLKernelFn, LoopBodyFn, VMap, false, Returns);
 
+    // Update address spaces of kernel arguments.
     auto &ArgList = OCLKernelFn->getArgumentList();
 
     for (auto &Arg : ArgList) {
@@ -143,6 +177,8 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
       }
     }
 
+    // Clone the kernel function and the functions that it calls into a new
+    // OpenCL module.
     auto ShouldCloneDefinition = [&OCLKernelFn](const GlobalValue *GV) {
       return GV == OCLKernelFn ||
              std::any_of(GV->user_begin(), GV->user_end(),
@@ -193,15 +229,92 @@ void PIRToOpenCLPass::startRegionEmission(const ParallelRegion &PR,
       }
     }
 
+    std::string OCLKernelFileName = OCLKernelFn->getName().str() + ".cl";
     std::ostream *OutStream =
-        new std::ofstream(OCLKernelFn->getName().str() + ".cl", std::ios::out);
+        new std::ofstream(OCLKernelFileName, std::ios::out);
 
     emitKernelFile(&*New, OCLKernelFn, *OutStream);
     delete OutStream;
 
-    DUMP(LoopBodyFn);
-    DUMP(OCLKernelFn);
-    New->dump();
+    // Driver call emission
+
+    // Prepare arguments for the OpenCL driver call and make the call.
+    auto *InvokeDriverFn = declareInvokeDriver(M);
+    IRBuilder<> IRBuilder(LoopPreHeader,
+                          LoopPreHeader->getTerminator()->getIterator());
+    auto *FileNameConst = IRBuilder.CreateGlobalStringPtr(OCLKernelFileName);
+    auto *KernelNameConst =
+        IRBuilder.CreateGlobalStringPtr(OCLKernelFn->getName());
+    auto *TripCountVal =
+      IRBuilder.CreateAdd(LatchCountVal, IRBuilder.getInt32(1), "trip.cnt");
+    auto *Int8PtrTy = Type::getInt8PtrTy(M->getContext());
+    auto *Int32Ty = Type::getInt32Ty(M->getContext());
+
+    auto *ArgPtrs = IRBuilder.CreateAlloca(
+        Int8PtrTy, IRBuilder.getInt32(ExtractedFnCall->getNumArgOperands()),
+        "arg.ptrs");
+    auto *ArgSizes = IRBuilder.CreateAlloca(
+        Int32Ty, IRBuilder.getInt32(ExtractedFnCall->getNumArgOperands()),
+        "arg.sizes");
+    auto *ArgTypes = IRBuilder.CreateAlloca(
+        Int32Ty, IRBuilder.getInt32(ExtractedFnCall->getNumArgOperands()),
+        "arg.ptrs");
+
+    int i = 0;
+    for (auto &Arg : ExtractedFnCall->arg_operands()) {
+      auto *ArgPtr = Arg.get();
+      // NOTE a very naive assumption that arrays accessed with a parallel loop
+      // always contain TripCountVal elements and the access starts from 0.
+      auto *NumElemsVal = TripCountVal;
+      auto *ArgTypeVal = IRBuilder.getInt32(OpenCLKernelArgType::Array);
+
+      // Demote scalar arguments to memory to get a pointer that can passed to
+      // OpenCL API.
+      if (!Arg.get()->getType()->isPointerTy()) {
+        ArgPtr = DemoteRegToStack(*dyn_cast<Instruction>(Arg.get()));
+        NumElemsVal = IRBuilder.getInt32(1);
+        ArgTypeVal = IRBuilder.getInt32(OpenCLKernelArgType::Scalar);
+      }
+
+      auto *ArgPtrCast = IRBuilder.CreateBitCast(ArgPtr, Int8PtrTy);
+      auto *ArgPtrElem =
+          IRBuilder.CreateInBoundsGEP(ArgPtrs, {IRBuilder.getInt32(i)});
+      auto *ArgPtrStore = IRBuilder.CreateStore(ArgPtrCast, ArgPtrElem);
+
+      auto *ArgSize =
+          IRBuilder.CreateMul(NumElemsVal,
+                              IRBuilder.getInt32(DL.getTypeAllocSize(
+                                  ArgPtr->getType()->getPointerElementType())));
+      auto *ArgSizeElem =
+        IRBuilder.CreateInBoundsGEP(ArgSizes, {IRBuilder.getInt32(i)});
+      auto *ArgSizeStore = IRBuilder.CreateStore(ArgSize, ArgSizeElem);
+
+      auto *ArgTypeElem =
+        IRBuilder.CreateInBoundsGEP(ArgTypes, {IRBuilder.getInt32(i)});
+      auto *ArgTypeStore = IRBuilder.CreateStore(ArgTypeVal, ArgTypeElem);
+      ++i;
+    }
+
+    auto *DriverCall = IRBuilder.CreateCall(
+        InvokeDriverFn,
+        {FileNameConst, KernelNameConst, TripCountVal, IRBuilder.getInt32(i),
+         ArgPtrs, ArgSizes, ArgTypes});
+
+    // Cleanup
+
+    // Re-calculate LoopInfo since the parallel loop structure has changed.
+    auto &LI2 = getAnalysis<LoopInfoWrapperPass>(*SpawningFn).getLoopInfo();
+    Loop *L2 = LI2.getLoopFor(LoopHeader);
+
+    // Extract the loop into a function in preparation to delete the loop.
+    CodeExtractor LoopExtractor(DT, *L2);
+    auto *LoopFn = LoopExtractor.extractCodeRegion();
+    auto *LoopFnCall = FindCallToExtractedFn(SpawningFn, LoopFn);
+    LoopFnCall->eraseFromParent();
+    LoopFn->eraseFromParent();
+
+    LoopBodyFn->eraseFromParent();
+    OCLKernelFn->eraseFromParent();
   } else {
     assert(false && "Non-Loop regions are not supported yet!");
   }
@@ -287,15 +400,17 @@ Function *PIRToOpenCLPass::declareOCLRegionFn(Function *RegionFn,
 
   auto ArgIt = FnArgList.begin();
   auto ArgNameIt = FnArgNames.begin();
+  int i = 0;
 
   for (auto &ArgAttr : FnArgAttrs) {
     if ((*ArgIt).getType()->isPointerTy()) {
       (*ArgIt).addAttr(ArgAttr);
     }
 
-    (*ArgIt).setName(*ArgNameIt);
+    (*ArgIt).setName("arg_" + Twine(i));
     ++ArgIt;
     ++ArgNameIt;
+    ++i;
   }
 
   auto OCLArgIt = OCLRegionFn->arg_begin();
@@ -334,6 +449,18 @@ Constant *PIRToOpenCLPass::createBuiltInFunction(OpenCLBuiltInFunction Function,
   }
 
   return OCLFn;
+}
+
+Constant *PIRToOpenCLPass::declareInvokeDriver(Module *M) {
+  auto *VoidTy = Type::getVoidTy(M->getContext());
+  auto *Int8PtrTy = Type::getInt8PtrTy(M->getContext());
+  auto *Int8PtrPtrTy = PointerType::getUnqual(Type::getInt8PtrTy(M->getContext()));
+  auto *Int32Ty = Type::getInt32Ty(M->getContext());
+  auto *Int32PtrTy = Type::getInt32PtrTy(M->getContext());
+  Type *TypeParams[] = {Int8PtrTy, Int8PtrTy, Int32Ty, Int32Ty,
+                        Int8PtrPtrTy, Int32PtrTy, Int32PtrTy};
+  FunctionType *FnTy = FunctionType::get(VoidTy, TypeParams, false);
+  return M->getOrInsertFunction("invokeDriver", FnTy);
 }
 
 void PIRToOpenCLPass::getAnalysisUsage(AnalysisUsage &AU) const {

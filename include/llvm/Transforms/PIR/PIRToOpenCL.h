@@ -25,6 +25,8 @@ enum OpenCLBuiltInFunction {
   OCL__get_global_id,
 };
 
+enum OpenCLKernelArgType { Scalar = 0, Array = 1 };
+
 class PIRToOpenCLPass : public ModulePass {
 public:
   static char ID;
@@ -51,6 +53,8 @@ private:
   int emitKernelFile(Module *M, Function *OCLKernel, std::ostream &Out);
 
   Constant *createBuiltInFunction(OpenCLBuiltInFunction Function, Module *M);
+
+  Constant *declareInvokeDriver(Module *M);
 
 private:
   ParallelRegionInfo *PRI = nullptr;

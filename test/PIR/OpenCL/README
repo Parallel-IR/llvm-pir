@@ -1,6 +1,6 @@
 This directory contains test cases for Parallel IR OpenCL backend
 
 To run a test case with a file named {test}.ll:
-omp -S -mem2reg -pir2ocl {test}.ll
+opt -S -mem2reg -pir2ocl {test}.ll
 
 A .cl file will be generated that contains the extracted OpenCL kernel from the PIR region.
