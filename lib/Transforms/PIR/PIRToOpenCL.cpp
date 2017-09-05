@@ -37,12 +37,11 @@ bool PIRToOpenCLPass::verifyExtractedFn(Function *Fn) const {
 }
 
 bool PIRToOpenCLPass::runOnModule(Module &M) {
-  errs() << "Hello OpenCL\n";
-
   for (auto &F : M) {
     if (F.isDeclaration()) {
       continue;
     }
+
     PRI = &getAnalysis<ParallelRegionInfoPass>(F).getParallelRegionInfo();
 
     LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
