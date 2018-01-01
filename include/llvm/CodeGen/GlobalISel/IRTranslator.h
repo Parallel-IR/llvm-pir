@@ -348,6 +348,15 @@ private:
   bool translateUserOp2(const User &U, MachineIRBuilder &MIRBuilder) {
     return false;
   }
+  bool translateFork(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateHalt(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateJoin(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
 
   /// @}
 

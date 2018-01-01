@@ -1119,6 +1119,131 @@ UnreachableInst::UnreachableInst(LLVMContext &Context, BasicBlock *InsertAtEnd)
   : TerminatorInst(Type::getVoidTy(Context), Instruction::Unreachable,
                    nullptr, 0, InsertAtEnd) {
 }
+//===----------------------------------------------------------------------===//
+//                        ForkInst Implementation
+//===----------------------------------------------------------------------===//
+
+void ForkInst::AssertOK() {}
+
+ForkInst::ForkInst(LLVMContext &Context, BasicBlock *Forked,
+                   BasicBlock *Continue, Instruction *InsertBefore)
+    : TerminatorInst(Type::getVoidTy(Context), Instruction::Fork,
+                     OperandTraits<ForkInst>::op_end(this), 2, InsertBefore) {
+  Op<0>() = Forked;
+  Op<1>() = Continue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
+ForkInst::ForkInst(LLVMContext &Context, BasicBlock *Forked,
+                   BasicBlock *Continue, BasicBlock *InsertAtEnd)
+    : TerminatorInst(Type::getVoidTy(Context), Instruction::Fork,
+                     OperandTraits<ForkInst>::op_end(this), 2, InsertAtEnd) {
+  Op<0>() = Forked;
+  Op<1>() = Continue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
+ForkInst::ForkInst(const ForkInst &FI)
+    : TerminatorInst(Type::getVoidTy(FI.getContext()), Instruction::Fork,
+                     OperandTraits<ForkInst>::op_end(this),
+                     FI.getNumOperands()) {
+  Op<0>() = FI.Op<0>();
+  Op<1>() = FI.Op<1>();
+  assert(FI.getNumOperands() == 2 && "Fork must have 2 operands!");
+  SubclassOptionalData = FI.SubclassOptionalData;
+}
+
+void ForkInst::swapSuccessors() {
+  Op<0>().swap(Op<1>());
+
+  // Update profile metadata if present and it matches our structrual
+  // expectations.
+  MDNode *ProfileData = getMetadata(LLVMContext::MD_prof);
+  if (!ProfileData || ProfileData->getNumOperands() != 2)
+    return;
+
+  // The first operand is the name. Fetch them backwards and build a new one.
+  Metadata *Ops[] = {ProfileData->getOperand(1), ProfileData->getOperand(0)};
+
+  setMetadata(LLVMContext::MD_prof,
+              MDNode::get(ProfileData->getContext(), Ops));
+}
+
+//===----------------------------------------------------------------------===//
+//                        HaltInst Implementation
+//===----------------------------------------------------------------------===//
+
+void HaltInst::AssertOK() {}
+
+HaltInst::HaltInst(LLVMContext &Context, BasicBlock *ForkContinue,
+                   Instruction *InsertBefore)
+    : TerminatorInst(Type::getVoidTy(Context), Instruction::Halt,
+                     OperandTraits<HaltInst>::op_end(this), 1, InsertBefore) {
+  Op<0>() = ForkContinue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
+HaltInst::HaltInst(LLVMContext &Context, BasicBlock *ForkContinue,
+                   BasicBlock *InsertAtEnd)
+    : TerminatorInst(Type::getVoidTy(Context), Instruction::Halt,
+                     OperandTraits<HaltInst>::op_end(this), 1, InsertAtEnd) {
+  Op<0>() = ForkContinue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
+HaltInst::HaltInst(const HaltInst &HI)
+    : TerminatorInst(Type::getVoidTy(HI.getContext()), Instruction::Halt,
+                     OperandTraits<HaltInst>::op_end(this) -
+                         HI.getNumOperands(),
+                     HI.getNumOperands()) {
+  Op<0>() = HI.Op<0>();
+  assert(HI.getNumOperands() == 1 && "Halt must have 1 operand!");
+  SubclassOptionalData = HI.SubclassOptionalData;
+}
+
+//===----------------------------------------------------------------------===//
+//                        JoinInst Implementation
+//===----------------------------------------------------------------------===//
+
+void JoinInst::AssertOK() {}
+
+JoinInst::JoinInst(LLVMContext &Context, BasicBlock *Continue,
+                   Instruction *InsertBefore)
+    : TerminatorInst(Type::getVoidTy(Context), Instruction::Join,
+                     OperandTraits<JoinInst>::op_end(this), 1, InsertBefore) {
+  Op<0>() = Continue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
+JoinInst::JoinInst(LLVMContext &Context, BasicBlock *Continue,
+                   BasicBlock *InsertAtEnd)
+    : TerminatorInst(Type::getVoidTy(Context), Instruction::Join,
+                     OperandTraits<JoinInst>::op_end(this), 1, InsertAtEnd) {
+  Op<0>() = Continue;
+#ifndef NDEBUG
+  AssertOK();
+#endif
+}
+
+JoinInst::JoinInst(const JoinInst &JI)
+    : TerminatorInst(Type::getVoidTy(JI.getContext()), Instruction::Join,
+                     OperandTraits<JoinInst>::op_end(this) -
+                         JI.getNumOperands(),
+                     JI.getNumOperands()) {
+  Op<0>() = JI.Op<0>();
+  assert(JI.getNumOperands() == 1 && "Join must have 1 operand!");
+  SubclassOptionalData = JI.SubclassOptionalData;
+}
 
 //===----------------------------------------------------------------------===//
 //                        BranchInst Implementation
@@ -3955,4 +4080,16 @@ FuncletPadInst *FuncletPadInst::cloneImpl() const {
 UnreachableInst *UnreachableInst::cloneImpl() const {
   LLVMContext &Context = getContext();
   return new UnreachableInst(Context);
+}
+
+ForkInst *ForkInst::cloneImpl() const {
+  return new (getNumOperands()) ForkInst(*this);
+}
+
+HaltInst *HaltInst::cloneImpl() const {
+  return new (getNumOperands()) HaltInst(*this);
+}
+
+JoinInst *JoinInst::cloneImpl() const {
+  return new (getNumOperands()) JoinInst(*this);
 }
