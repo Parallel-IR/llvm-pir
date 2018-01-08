@@ -792,6 +792,18 @@ public:
     return Insert(Br);
   }
 
+  ForkInst *CreateFork(BasicBlock* Forked, BasicBlock* Continuation) {
+    return Insert(ForkInst::Create(Context, Forked, Continuation));
+  }
+
+  HaltInst *CreateHalt(BasicBlock* Continuation) {
+    return Insert(HaltInst::Create(Continuation));
+  }
+
+  JoinInst *CreateJoin(BasicBlock* Exit) {
+    return Insert(JoinInst::Create(Context, Exit));
+  }
+
   /// \brief Create a switch instruction with the specified value, default dest,
   /// and with a hint for the number of cases that will be added (for efficient
   /// allocation).

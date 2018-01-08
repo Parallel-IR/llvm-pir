@@ -4121,7 +4121,7 @@ Error BitcodeReader::parseFunctionBody(Function *F) {
       if (!ForkContinue)
         return error("Invalid record");
 
-      I = HaltInst::Create(Context, ForkContinue);
+      I = HaltInst::Create(ForkContinue);
       InstructionList.push_back(I);
       break;
     }

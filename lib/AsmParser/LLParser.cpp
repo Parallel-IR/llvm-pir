@@ -5307,7 +5307,7 @@ bool LLParser::ParseHalt(Instruction *&Inst, PerFunctionState &PFS) {
   if (ParseTypeAndBasicBlock(Op, Loc, PFS))
     return true;
 
-  Inst = HaltInst::Create(Context, Op);
+  Inst = HaltInst::Create(Op);
   return false;
 }
 

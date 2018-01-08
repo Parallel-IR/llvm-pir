@@ -4700,13 +4700,13 @@ protected:
   HaltInst *cloneImpl() const;
 
 public:
-  static HaltInst *Create(LLVMContext &C, BasicBlock *ForkContinue,
+  static HaltInst *Create(BasicBlock *ForkContinue,
                           Instruction *InsertBefore = nullptr) {
-    return new (1) HaltInst(C, ForkContinue, InsertBefore);
+    return new (1) HaltInst(ForkContinue->getContext(), ForkContinue, InsertBefore);
   }
-  static HaltInst *Create(LLVMContext &C, BasicBlock *ForkContinue,
+  static HaltInst *Create(BasicBlock *ForkContinue,
                           BasicBlock *InsertAtEnd) {
-    return new (1) HaltInst(C, ForkContinue, InsertAtEnd);
+    return new (1) HaltInst(ForkContinue->getContext(), ForkContinue, InsertAtEnd);
   }
 
   /// Transparently provide more efficient getOperand methods.
